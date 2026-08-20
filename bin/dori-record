@@ -12,13 +12,14 @@
 
 set -uo pipefail
 
+# shellcheck source=dori-lib.sh
+. "$(dirname "$(readlink -f "$0")")/dori-lib.sh" || exit 1
+
 DIR="${DORI_RECORD_DIR:-$HOME/Videos/dori}"
 CODEC="h264"
 BITRATE="20M"
-RUNDIR="${XDG_RUNTIME_DIR:-/tmp}/dori"
-mkdir -p "$RUNDIR"
+RUNDIR=$(dori_rundir) || exit 1
 LOG="$RUNDIR/record.log"
-MARKER="--record="
 ACTION=""
 
 while (($# > 0)); do
@@ -54,20 +55,11 @@ dori_serial() {
 
 notify() { command -v notify-send >/dev/null 2>&1 && notify-send "$@"; }
 
-# Find processes by their actual executable name, then filter on an argument
-# substring. `pgrep -f` alone matches anything that merely mentions the string
-# — an editor with the script open, or the shell that launched this.
-proc_pids() {
-  pgrep -a -x "$1" 2>/dev/null | awk -v m="$2" 'index($0, m) { print $1 }'
-}
-
-proc_args() {
-  pgrep -a -x "$1" 2>/dev/null | awk -v m="$2" 'index($0, m) { print; exit }'
-}
-
-current_file() {
-  proc_args scrcpy "$MARKER" | grep -oP -- '--record=\K\S+' | head -1
-}
+# The running recording, or nothing. Only ever the process this script started
+# — see dori_record_live in dori-lib.sh for why a --record= command line is not
+# enough to go on.
+current_pid() { dori_record_pid "$RUNDIR"; }
+current_file() { dori_record_file "$RUNDIR"; }
 
 case "$ACTION" in
   status)
@@ -76,21 +68,22 @@ case "$ACTION" in
       '{recording: ($file != ""), file: (if $file == "" then null else $file end)}'
     ;;
   stop)
-    pids=$(proc_pids scrcpy "$MARKER")
+    pid=$(current_pid)
     file=$(current_file)
-    if [[ -n $pids ]]; then
-      kill $pids 2>/dev/null
+    if [[ -n $pid ]]; then
+      kill "$pid" 2>/dev/null
       # Give scrcpy a moment to write the container index, then say where it is.
       for _ in {1..12}; do
-        [[ -z "$(proc_pids scrcpy "$MARKER")" ]] && break
+        [[ -z "$(current_pid)" ]] && break
         sleep 0.25
       done
+      dori_record_forget "$RUNDIR"
       notify "Dori" "Recording saved to ${file:-$DIR}"
       echo "${file:-}"
     fi
     ;;
   start | toggle)
-    if [[ -n "$(proc_pids scrcpy "$MARKER")" ]]; then
+    if [[ -n "$(current_pid)" ]]; then
       [[ $ACTION == "toggle" ]] && exec "$0" stop --dir "$DIR"
       echo "dori-record: already recording $(current_file)" >&2
       exit 0
@@ -110,9 +103,14 @@ case "$ACTION" in
         --record="$out" \
         --video-codec="$CODEC" --video-bit-rate="$BITRATE" \
         >"$LOG" 2>&1 &
+      pid=$!
       disown
+      # nohup execs scrcpy, so $! is scrcpy itself. Write it down before the
+      # wait: this pid, and nothing else, is what stop and status act on.
+      dori_record_write "$RUNDIR" "$pid" "$out"
       sleep 1.2
-      [[ -n "$(proc_pids scrcpy "$MARKER")" ]] && break
+      [[ -n "$(current_pid)" ]] && break
+      dori_record_forget "$RUNDIR"
       ((attempt == 1)) && echo "dori-record: scrcpy died on launch, retrying" >&2
     done
     # scrcpy pushes its server to the phone before it records anything, and
@@ -120,7 +118,8 @@ case "$ACTION" in
     # appear, and treat scrcpy exiting as the failure it is.
     for _ in {1..24}; do
       [[ -s $out ]] && break
-      if [[ -z "$(proc_pids scrcpy "$MARKER")" ]]; then
+      if [[ -z "$(current_pid)" ]]; then
+        dori_record_forget "$RUNDIR"
         notify -u critical "Dori" "The recording did not start. See $LOG"
         echo "dori-record: scrcpy exited before writing anything; see $LOG" >&2
         rm -f "$out"

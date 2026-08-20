@@ -16,9 +16,11 @@
 
 set -uo pipefail
 
+# shellcheck source=dori-lib.sh
+. "$(dirname "$(readlink -f "$0")")/dori-lib.sh" || exit 1
+
 INTERVAL=4
-RUNDIR="${XDG_RUNTIME_DIR:-/tmp}/dori"
-mkdir -p "$RUNDIR"
+RUNDIR=$(dori_rundir) || exit 1
 SEEN="$RUNDIR/notify-seen"
 ACTION=""
 

@@ -20,13 +20,17 @@
 
 set -uo pipefail
 
-OUT="${XDG_RUNTIME_DIR:-/tmp}/dori/frame.png"
+# shellcheck source=dori-lib.sh
+. "$(dirname "$(readlink -f "$0")")/dori-lib.sh" || exit 1
+
+RUNDIR=$(dori_rundir) || exit 1
+OUT="$RUNDIR/frame.png"
 WIDTH=320
 
 while (($# > 0)); do
   case "$1" in
     --out) OUT="${2:-$OUT}"; shift 2 ;;
-    --slot) OUT="${XDG_RUNTIME_DIR:-/tmp}/dori/frame-${2:-a}.png"; shift 2 ;;
+    --slot) OUT="$RUNDIR/frame-${2:-a}.png"; shift 2 ;;
     --width) WIDTH="${2:-320}"; shift 2 ;;
     -h | --help)
       sed -n '2,11p' "$0"

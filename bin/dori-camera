@@ -18,16 +18,18 @@
 
 set -uo pipefail
 
+# shellcheck source=dori-lib.sh
+. "$(dirname "$(readlink -f "$0")")/dori-lib.sh" || exit 1
+
 DEVICE="${DORI_V4L2_DEVICE:-/dev/video10}"
 BACK_ID=0
 FRONT_ID=1
 FRONT_ROTATION=0
 MAX_SIZE=1920
 FPS=30
-RUNDIR="${XDG_RUNTIME_DIR:-/tmp}/dori"
+RUNDIR=$(dori_rundir) || exit 1
 MODE=""
 
-mkdir -p "$RUNDIR"
 LOG="$RUNDIR/camera.log"
 
 while (($# > 0)); do

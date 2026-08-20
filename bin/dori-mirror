@@ -19,9 +19,11 @@
 
 set -uo pipefail
 
+# shellcheck source=dori-lib.sh
+. "$(dirname "$(readlink -f "$0")")/dori-lib.sh" || exit 1
+
 TITLE="Dori Mirror"
-RUNDIR="${XDG_RUNTIME_DIR:-/tmp}/dori"
-mkdir -p "$RUNDIR"
+RUNDIR=$(dori_rundir) || exit 1
 LOG="$RUNDIR/mirror.log"
 
 CODEC="${PM_CODEC:-h264}"
