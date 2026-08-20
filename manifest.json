@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.infiniv.dori",
+  "name": "Dori",
+  "version": "1.0.0",
+  "author": "infiniV",
+  "license": "MIT",
+  "description": "Turn an Android phone into a webcam and a second screen, over USB.",
+  "kinds": ["bar-widget"],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Dori",
+    "description": "One bar icon and one panel: the phone's camera as a real v4l2 webcam, and its screen mirrored here, both over adb.",
+    "category": "System",
+    "aliases": ["dori", "phone"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "codec": "h264",
+      "bitrateMbps": 20,
+      "maxFps": 60,
+      "screenOff": false,
+      "hideWhenAbsent": false,
+      "videoDevice": "/dev/video10",
+      "backCameraId": 0,
+      "frontCameraId": 1,
+      "frontRotation": 0
+    },
+    "schema": [
+      { "key": "videoDevice", "type": "path", "label": "Webcam device", "defaultValue": "/dev/video10", "description": "The v4l2loopback node the camera is streamed into. Must match the video_nr set when the module is loaded." },
+      { "key": "backCameraId", "type": "integer", "label": "Back camera id", "min": 0, "max": 9, "step": 1, "defaultValue": 0, "description": "Run `scrcpy --list-cameras` if the back and front buttons are swapped." },
+      { "key": "frontCameraId", "type": "integer", "label": "Front camera id", "min": 0, "max": 9, "step": 1, "defaultValue": 1 },
+      { "key": "frontRotation", "type": "enum", "label": "Front camera rotation", "options": ["0", "90", "180", "270"], "defaultValue": "0", "description": "Some phones deliver the front sensor upside down. Set 180 if yours does." },
+      { "key": "codec", "type": "enum", "label": "Mirror codec", "options": ["h264", "h265"], "defaultValue": "h264" },
+      { "key": "bitrateMbps", "type": "integer", "label": "Mirror bitrate (Mbps)", "min": 4, "max": 60, "step": 2, "defaultValue": 20 },
+      { "key": "maxFps", "type": "integer", "label": "Mirror frame rate", "min": 15, "max": 120, "step": 5, "defaultValue": 60 },
+      { "key": "screenOff", "type": "boolean", "label": "Blank the phone screen while mirroring", "defaultValue": false },
+      { "key": "hideWhenAbsent", "type": "boolean", "label": "Hide the bar icon when no phone is attached", "defaultValue": false }
+    ]
+  }
+}

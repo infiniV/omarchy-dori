@@ -1,0 +1,101 @@
+#!/bin/bash
+# One-time host setup for Dori. Run it in a terminal; it asks for the sudo
+# password itself and never installs a passwordless rule.
+#
+#   dori-setup [--device-number 10]
+#
+# It does three things, each skipped when already done:
+#
+#   1. installs scrcpy, android-tools, and v4l2loopback-dkms with pacman
+#   2. writes /etc/modprobe.d and /etc/modules-load.d entries so the loopback
+#      webcam exists after every reboot
+#   3. loads the module now, so nothing has to be rebooted today
+#
+# Undo it with dori-setup --uninstall, which removes only the two files it
+# wrote and unloads the module.
+
+set -uo pipefail
+
+VIDEO_NR=10
+LABEL="Phone Camera"
+MODPROBE_CONF="/etc/modprobe.d/dori-v4l2loopback.conf"
+MODULES_CONF="/etc/modules-load.d/dori-v4l2loopback.conf"
+ACTION="install"
+
+while (($# > 0)); do
+  case "$1" in
+    --device-number) VIDEO_NR="${2:-10}"; shift 2 ;;
+    --uninstall) ACTION="uninstall"; shift ;;
+    -h | --help)
+      sed -n '2,17p' "$0"
+      exit 0
+      ;;
+    *)
+      echo "dori-setup: unknown argument $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+ok() { printf '  \033[32m✓\033[0m %s\n' "$*"; }
+warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
+
+if [[ $ACTION == "uninstall" ]]; then
+  say "Removing Dori's host setup"
+  sudo rm -f "$MODPROBE_CONF" "$MODULES_CONF"
+  ok "removed $MODPROBE_CONF and $MODULES_CONF"
+  sudo modprobe -r v4l2loopback 2>/dev/null && ok "unloaded v4l2loopback" ||
+    warn "v4l2loopback is in use; it will be gone after the next reboot"
+  echo
+  echo "The packages are left installed. Remove them yourself if nothing else uses them:"
+  echo "  sudo pacman -Rns v4l2loopback-dkms scrcpy android-tools"
+  exit 0
+fi
+
+say "1. Packages"
+if command -v pacman >/dev/null 2>&1; then
+  missing=()
+  command -v scrcpy >/dev/null 2>&1 || missing+=(scrcpy)
+  command -v adb >/dev/null 2>&1 || missing+=(android-tools)
+  command -v v4l2-ctl >/dev/null 2>&1 || missing+=(v4l-utils)
+  modinfo v4l2loopback >/dev/null 2>&1 || missing+=(v4l2loopback-dkms)
+  if ((${#missing[@]})); then
+    echo "  installing: ${missing[*]}"
+    sudo pacman -S --needed "${missing[@]}" || exit 1
+  fi
+  ok "scrcpy, android-tools, v4l-utils, v4l2loopback-dkms present"
+else
+  warn "not an Arch system; install scrcpy, android-tools, v4l-utils and v4l2loopback yourself"
+fi
+
+say "2. Persistent webcam device (/dev/video$VIDEO_NR)"
+printf 'options v4l2loopback devices=1 video_nr=%s card_label="%s" exclusive_caps=1\n' \
+  "$VIDEO_NR" "$LABEL" | sudo tee "$MODPROBE_CONF" >/dev/null
+ok "wrote $MODPROBE_CONF"
+printf 'v4l2loopback\n' | sudo tee "$MODULES_CONF" >/dev/null
+ok "wrote $MODULES_CONF"
+
+say "3. Loading it now"
+if [[ -c "/dev/video$VIDEO_NR" ]]; then
+  ok "/dev/video$VIDEO_NR already exists"
+else
+  sudo modprobe v4l2loopback || {
+    warn "modprobe failed; a reboot may be needed for the dkms module to build"
+    exit 1
+  }
+  [[ -c "/dev/video$VIDEO_NR" ]] && ok "/dev/video$VIDEO_NR created" ||
+    warn "module loaded but /dev/video$VIDEO_NR is missing; check $MODPROBE_CONF"
+fi
+
+# logind hands the active local session an ACL on /dev/video*, so the video
+# group is usually unnecessary. Only say something when the node is actually
+# unreadable, rather than sending everyone off to run usermod for nothing.
+if [[ -c "/dev/video$VIDEO_NR" && ! -r "/dev/video$VIDEO_NR" ]]; then
+  warn "/dev/video$VIDEO_NR is not readable by you. Try:"
+  echo "      sudo usermod -aG video $USER   # then log out and back in"
+fi
+
+say "Done"
+echo "  Enable USB debugging on the phone (Settings › Developer options),"
+echo "  plug it in, accept the prompt, then click the Dori icon in the bar."

@@ -1,0 +1,138 @@
+#!/bin/bash
+# Stream a phone camera into a v4l2 loopback node with scrcpy, so it shows up
+# as an ordinary webcam in Meet, Zoom, OBS, and anything else that opens
+# /dev/video*.
+#
+#   dori-camera back | front | off | cycle
+#
+#   --device DEV          loopback node to write into (default /dev/video10)
+#   --back-id N           camera id for "back"  (default 0)
+#   --front-id N          camera id for "front" (default 1)
+#   --front-rotation DEG  0|90|180|270, for phones that deliver the front
+#                         sensor upside down (default 0)
+#   --max-size PX         longest edge, 0 for native (default 1920)
+#   --fps N               capture frame rate (default 30)
+#
+# Requires Android 12 or newer: camera capture is a scrcpy feature that the
+# older platform releases cannot serve.
+
+set -uo pipefail
+
+DEVICE="${DORI_V4L2_DEVICE:-/dev/video10}"
+BACK_ID=0
+FRONT_ID=1
+FRONT_ROTATION=0
+MAX_SIZE=1920
+FPS=30
+RUNDIR="${XDG_RUNTIME_DIR:-/tmp}/dori"
+MODE=""
+
+mkdir -p "$RUNDIR"
+LOG="$RUNDIR/camera.log"
+
+while (($# > 0)); do
+  case "$1" in
+    --device) DEVICE="${2:-}"; shift 2 ;;
+    --back-id) BACK_ID="${2:-0}"; shift 2 ;;
+    --front-id) FRONT_ID="${2:-1}"; shift 2 ;;
+    --front-rotation) FRONT_ROTATION="${2:-0}"; shift 2 ;;
+    --max-size) MAX_SIZE="${2:-1920}"; shift 2 ;;
+    --fps) FPS="${2:-30}"; shift 2 ;;
+    -h | --help)
+      sed -n '2,18p' "$0"
+      exit 0
+      ;;
+    -*)
+      echo "dori-camera: unknown flag $1" >&2
+      exit 1
+      ;;
+    *) MODE="$1"; shift ;;
+  esac
+done
+MODE="${MODE:-cycle}"
+
+notify() { command -v notify-send >/dev/null 2>&1 && notify-send "$@"; }
+
+current_cam() {
+  pgrep -af -- "scrcpy.*--v4l2-sink=$DEVICE" 2>/dev/null |
+    grep -oP -- '--camera-id=\K\d+' | head -1
+}
+
+stop_stream() {
+  pkill -f -- "scrcpy.*--v4l2-sink=$DEVICE"
+}
+
+require_ready() {
+  if [[ ! -c $DEVICE ]]; then
+    notify -u critical "Dori" \
+      "No webcam device at $DEVICE. Run dori-setup once to load v4l2loopback."
+    echo "dori-camera: $DEVICE is not a character device; run dori-setup" >&2
+    exit 1
+  fi
+  if [[ "$(adb get-state 2>/dev/null)" != "device" ]]; then
+    notify -u critical "Dori" "No phone over adb. Connect USB and accept the debugging prompt."
+    echo "dori-camera: no adb device in state 'device'" >&2
+    exit 1
+  fi
+}
+
+start_stream() {
+  local cam=$1 label=$2
+  local rotate=()
+  [[ $label == "front" && $FRONT_ROTATION != "0" ]] &&
+    rotate=(--capture-orientation="$FRONT_ROTATION")
+
+  require_ready
+  nohup scrcpy --video-source=camera --camera-id="$cam" \
+    --camera-ar=16:9 --max-size="$MAX_SIZE" --max-fps="$FPS" \
+    "${rotate[@]}" \
+    --v4l2-sink="$DEVICE" --no-audio --no-window \
+    >"$LOG" 2>&1 &
+  disown
+
+  # scrcpy fails asynchronously — a bad camera id or a busy sink shows up a
+  # beat later in the log, not in the exit code of the launch.
+  sleep 0.6
+  if [[ -z "$(current_cam)" ]]; then
+    notify -u critical "Dori" "Camera stream failed to start. See $LOG"
+    echo "dori-camera: stream did not come up; see $LOG" >&2
+    exit 1
+  fi
+  notify "Dori" "Streaming the $label camera to $DEVICE"
+}
+
+# Switching cameras means tearing the sink down first: scrcpy holds the node
+# exclusively, so the new stream cannot open it until the old one is gone.
+switch_to() {
+  local cam=$1 label=$2
+  if [[ -n "$(current_cam)" ]]; then
+    stop_stream
+    sleep 0.3
+  fi
+  start_stream "$cam" "$label"
+}
+
+case "$MODE" in
+  off | stop)
+    if [[ -n "$(current_cam)" ]]; then
+      stop_stream
+      notify "Dori" "Camera stream stopped"
+    fi
+    ;;
+  back) switch_to "$BACK_ID" "back" ;;
+  front) switch_to "$FRONT_ID" "front" ;;
+  cycle)
+    case "$(current_cam)" in
+      "") start_stream "$BACK_ID" "back" ;;
+      "$BACK_ID") switch_to "$FRONT_ID" "front" ;;
+      *)
+        stop_stream
+        notify "Dori" "Camera stream stopped"
+        ;;
+    esac
+    ;;
+  *)
+    echo "Usage: dori-camera <back|front|off|cycle> [flags]" >&2
+    exit 1
+    ;;
+esac
