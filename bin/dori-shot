@@ -1,0 +1,55 @@
+#!/bin/bash
+# Take a screenshot of the phone and put it on this machine — saved to disk and
+# copied to the clipboard, because the reason you took it is usually to paste it
+# somewhere.
+#
+#   dori-shot [--dir ~/Pictures/dori] [--no-clipboard]
+
+set -uo pipefail
+
+DIR="${DORI_SHOT_DIR:-$HOME/Pictures/dori}"
+CLIPBOARD=1
+
+while (($# > 0)); do
+  case "$1" in
+    --dir) DIR="${2:-$DIR}"; shift 2 ;;
+    --no-clipboard) CLIPBOARD=0; shift ;;
+    -h | --help)
+      sed -n '2,7p' "$0"
+      exit 0
+      ;;
+    *)
+      echo "dori-shot: unknown argument $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+notify() { command -v notify-send >/dev/null 2>&1 && notify-send "$@"; }
+
+if [[ "$(adb get-state 2>/dev/null)" != "device" ]]; then
+  notify -u critical "Dori" "No phone over adb."
+  echo "dori-shot: no adb device in state 'device'" >&2
+  exit 1
+fi
+
+mkdir -p "$DIR"
+out="$DIR/phone-$(date +%Y%m%d-%H%M%S).png"
+
+# exec-out keeps the PNG bytes intact; `adb shell screencap` mangles them on
+# some devices by translating line endings.
+if ! adb exec-out screencap -p >"$out" 2>/dev/null || [[ ! -s $out ]]; then
+  rm -f "$out"
+  notify -u critical "Dori" "The screenshot failed."
+  echo "dori-shot: screencap produced nothing" >&2
+  exit 1
+fi
+
+if ((CLIPBOARD)) && command -v wl-copy >/dev/null 2>&1; then
+  wl-copy --type image/png <"$out"
+  notify "Dori" "Screenshot copied to the clipboard and saved to $out"
+else
+  notify "Dori" "Screenshot saved to $out"
+fi
+
+echo "$out"

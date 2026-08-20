@@ -1,27 +1,29 @@
 #!/bin/bash
-# One JSON blob describing the attached phone, the camera stream, and the
-# screen mirror. The Dori panel polls this; it is also readable on its own,
-# which is how you debug a phone that will not cooperate without the shell in
-# the way.
+# One JSON blob describing the attached phone and everything Dori is doing with
+# it. The panel polls this; it is also readable on its own, which is how you
+# debug a phone that will not cooperate without the shell in the way.
+#
+#   dori-status [--device /dev/video10] [--full]
+#
+# --full adds the battery, which costs an extra adb round trip. The panel asks
+# for it only while it is open.
 #
 # Everything is best-effort: a field that cannot be determined comes back as
 # null or false rather than absent, so the panel never has to guess a shape.
-#
-#   dori-status [--device /dev/video10]
 
 set -uo pipefail
 
 DEVICE="${DORI_V4L2_DEVICE:-/dev/video10}"
 TITLE="Dori Mirror"
+RUNDIR="${XDG_RUNTIME_DIR:-/tmp}/dori"
+FULL=0
 
 while (($# > 0)); do
   case "$1" in
-    --device)
-      DEVICE="${2:-}"
-      shift 2
-      ;;
+    --device) DEVICE="${2:-}"; shift 2 ;;
+    --full) FULL=1; shift ;;
     -h | --help)
-      sed -n '2,10p' "$0"
+      sed -n '2,11p' "$0"
       exit 0
       ;;
     *)
@@ -31,23 +33,69 @@ while (($# > 0)); do
   esac
 done
 
-# adb state for the first device listed, including the unusable ones.
-# "unauthorized" is the single most common reason nothing works, and it
-# deserves to be said out loud rather than looking like "absent".
-adb_line=$(adb devices 2>/dev/null | awk 'NR > 1 && NF >= 2 {print $1, $2; exit}')
+mkdir -p "$RUNDIR"
+
+# Find processes by their actual executable name, then filter on an argument
+# substring. `pgrep -f` alone matches anything that merely mentions the string
+# — an editor with the script open, or the shell that launched this — and that
+# is the difference between "the camera is live" and "someone opened a file".
+proc_pids() {
+  pgrep -a -x "$1" 2>/dev/null | awk -v m="$2" 'index($0, m) { print $1 }'
+}
+
+proc_args() {
+  pgrep -a -x "$1" 2>/dev/null | awk -v m="$2" 'index($0, m) { print; exit }'
+}
+
+# The first device adb lists, including the unusable ones: "unauthorized" is the
+# single most common reason nothing works, and it deserves to be said out loud
+# rather than looking like "absent". A cabled phone wins over a wireless one,
+# because that is the one the user just plugged in.
+adb_line=$(adb devices 2>/dev/null | awk '
+  NR > 1 && NF >= 2 {
+    if ($1 !~ /:/) { print $1, $2; found = 1; exit }
+    if (!wireless) wireless = $1 " " $2
+  }
+  END { if (!found && wireless) print wireless }')
 serial=$(awk '{print $1}' <<<"$adb_line")
 state=$(awk '{print $2}' <<<"$adb_line")
 [[ -z $state ]] && state="absent"
+[[ $serial == *:* ]] && transport="wireless" || transport="usb"
+[[ $state == "absent" ]] && transport=""
 
+# The model and the Android version never change while a phone is attached, so
+# ask once per serial and read the answer from then on.
 model=""
+android=""
 if [[ $state == "device" && -n $serial ]]; then
-  model=$(adb -s "$serial" shell getprop ro.product.model 2>/dev/null | tr -d '\r')
+  cache="$RUNDIR/props-${serial//[^A-Za-z0-9._-]/_}"
+  if [[ ! -s $cache ]]; then
+    {
+      adb -s "$serial" shell getprop ro.product.model 2>/dev/null | tr -d '\r'
+      adb -s "$serial" shell getprop ro.build.version.release 2>/dev/null | tr -d '\r'
+    } >"$cache"
+  fi
+  model=$(sed -n 1p "$cache")
+  android=$(sed -n 2p "$cache")
 fi
 [[ -z $model ]] && model="$serial"
 
-# Which camera the running scrcpy is sinking to v4l2, if any.
-camera_id=$(pgrep -af -- "scrcpy.*--v4l2-sink=$DEVICE" 2>/dev/null |
-  grep -oP -- '--camera-id=\K\d+' | head -1)
+battery_json="null"
+if ((FULL)) && [[ $state == "device" && -n $serial ]]; then
+  dump=$(adb -s "$serial" shell dumpsys battery 2>/dev/null | tr -d '\r')
+  level=$(sed -n 's/^ *level: *//p' <<<"$dump" | head -1)
+  bstate=$(sed -n 's/^ *status: *//p' <<<"$dump" | head -1)
+  if [[ -n $level ]]; then
+    # BatteryManager: 2 is charging, 5 is full.
+    charging=false
+    [[ $bstate == "2" || $bstate == "5" ]] && charging=true
+    battery_json=$(jq -n --argjson level "$level" --argjson charging "$charging" \
+      '{level: $level, charging: $charging}')
+  fi
+fi
+
+# Which camera the running scrcpy is sinking into the loopback node, if any.
+camera_id=$(proc_args scrcpy "--v4l2-sink=$DEVICE" | grep -oP -- '--camera-id=\K\d+' | head -1)
 
 # A loopback node that does not exist means v4l2loopback was never loaded.
 loopback=false
@@ -60,25 +108,36 @@ if [[ $loopback == true ]] && command -v v4l2-ctl >/dev/null 2>&1; then
 fi
 
 mirroring=false
-pgrep -f -- "scrcpy.*--window-title=$TITLE" >/dev/null 2>&1 && mirroring=true
+[[ -n "$(proc_pids scrcpy "--window-title=$TITLE")" ]] && mirroring=true
+
+recording_file=$(proc_args scrcpy "--record=" | grep -oP -- '--record=\K\S+' | head -1)
 
 jq -n \
   --arg state "$state" \
   --arg serial "${serial:-}" \
   --arg model "$model" \
+  --arg android "$android" \
+  --arg transport "$transport" \
   --arg cameraId "${camera_id:-}" \
   --arg device "$DEVICE" \
   --arg card "$card" \
+  --arg recording "${recording_file:-}" \
+  --argjson battery "$battery_json" \
   --argjson loopback "$loopback" \
   --argjson mirroring "$mirroring" \
   '{
     state: $state,
     serial: (if $serial == "" then null else $serial end),
     model: (if $model == "" then null else $model end),
+    android: (if $android == "" then null else $android end),
+    transport: (if $transport == "" then null else $transport end),
     ready: ($state == "device"),
+    battery: $battery,
     cameraId: (if $cameraId == "" then null else ($cameraId | tonumber) end),
     device: $device,
     card: (if $card == "" then null else $card end),
     loopback: $loopback,
-    mirroring: $mirroring
+    mirroring: $mirroring,
+    recording: ($recording != ""),
+    recordingFile: (if $recording == "" then null else $recording end)
   }'

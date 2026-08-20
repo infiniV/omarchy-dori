@@ -1,0 +1,110 @@
+#!/bin/bash
+# Record the phone's screen to a file, without a mirror window in the way.
+#
+#   dori-record start | stop | toggle | status
+#
+#   --dir ~/Videos/dori   where the files go
+#   --codec h264|h265     video codec (default h264)
+#   --bitrate 20M         video bitrate (default 20M)
+#
+# Stopping sends SIGTERM so scrcpy can finalise the container; a killed
+# recording is an unplayable file.
+
+set -uo pipefail
+
+DIR="${DORI_RECORD_DIR:-$HOME/Videos/dori}"
+CODEC="h264"
+BITRATE="20M"
+RUNDIR="${XDG_RUNTIME_DIR:-/tmp}/dori"
+mkdir -p "$RUNDIR"
+LOG="$RUNDIR/record.log"
+MARKER="--record="
+ACTION=""
+
+while (($# > 0)); do
+  case "$1" in
+    --dir) DIR="${2:-$DIR}"; shift 2 ;;
+    --codec) CODEC="${2:-h264}"; shift 2 ;;
+    --bitrate) BITRATE="${2:-20M}"; shift 2 ;;
+    -h | --help)
+      sed -n '2,13p' "$0"
+      exit 0
+      ;;
+    -*)
+      echo "dori-record: unknown flag $1" >&2
+      exit 1
+      ;;
+    *) ACTION="$1"; shift ;;
+  esac
+done
+ACTION="${ACTION:-toggle}"
+
+notify() { command -v notify-send >/dev/null 2>&1 && notify-send "$@"; }
+
+# Find processes by their actual executable name, then filter on an argument
+# substring. `pgrep -f` alone matches anything that merely mentions the string
+# — an editor with the script open, or the shell that launched this.
+proc_pids() {
+  pgrep -a -x "$1" 2>/dev/null | awk -v m="$2" 'index($0, m) { print $1 }'
+}
+
+proc_args() {
+  pgrep -a -x "$1" 2>/dev/null | awk -v m="$2" 'index($0, m) { print; exit }'
+}
+
+current_file() {
+  proc_args scrcpy "$MARKER" | grep -oP -- '--record=\K\S+' | head -1
+}
+
+case "$ACTION" in
+  status)
+    file=$(current_file)
+    jq -n --arg file "${file:-}" \
+      '{recording: ($file != ""), file: (if $file == "" then null else $file end)}'
+    ;;
+  stop)
+    pids=$(proc_pids scrcpy "$MARKER")
+    file=$(current_file)
+    if [[ -n $pids ]]; then
+      kill $pids 2>/dev/null
+      # Give scrcpy a moment to write the container index, then say where it is.
+      for _ in {1..12}; do
+        [[ -z "$(proc_pids scrcpy "$MARKER")" ]] && break
+        sleep 0.25
+      done
+      notify "Dori" "Recording saved to ${file:-$DIR}"
+      echo "${file:-}"
+    fi
+    ;;
+  start | toggle)
+    if [[ -n "$(proc_pids scrcpy "$MARKER")" ]]; then
+      [[ $ACTION == "toggle" ]] && exec "$0" stop --dir "$DIR"
+      echo "dori-record: already recording $(current_file)" >&2
+      exit 0
+    fi
+    if [[ "$(adb get-state 2>/dev/null)" != "device" ]]; then
+      notify -u critical "Dori" "No phone over adb."
+      echo "dori-record: no adb device in state 'device'" >&2
+      exit 1
+    fi
+    mkdir -p "$DIR"
+    out="$DIR/phone-$(date +%Y%m%d-%H%M%S).mp4"
+    nohup scrcpy --no-window --no-playback \
+      --record="$out" \
+      --video-codec="$CODEC" --video-bit-rate="$BITRATE" \
+      >"$LOG" 2>&1 &
+    disown
+    sleep 0.8
+    if [[ -z "$(proc_pids scrcpy "$MARKER")" ]]; then
+      notify -u critical "Dori" "The recording did not start. See $LOG"
+      echo "dori-record: scrcpy exited; see $LOG" >&2
+      exit 1
+    fi
+    notify "Dori" "Recording the phone screen"
+    echo "$out"
+    ;;
+  *)
+    echo "Usage: dori-record <start|stop|toggle|status>" >&2
+    exit 1
+    ;;
+esac

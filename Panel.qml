@@ -24,8 +24,17 @@ Panel {
   readonly property bool ready: status.ready === true
   readonly property string model: String(status.model || "Phone")
   readonly property bool mirroring: status.mirroring === true
+  readonly property bool recording: status.recording === true
   readonly property bool loopback: status.loopback !== false
   readonly property string card: String(status.card || "")
+  readonly property string android: String(status.android || "")
+  readonly property bool wireless: String(status.transport || "") === "wireless"
+
+  // Battery is only in the blob while the panel is open — it costs an adb round
+  // trip, and the bar icon has nowhere to show it anyway.
+  readonly property var battery: status.battery || null
+  readonly property int batteryLevel: battery ? Number(battery.level) : -1
+  readonly property bool charging: battery ? battery.charging === true : false
 
   // Which sensor is live. The ids are settings because "back is 0, front is 1"
   // holds on most phones and not on all of them.
@@ -74,9 +83,11 @@ Panel {
   readonly property string heroStatus: {
     if (!attached) return "Not connected"
     if (problem !== "") return deviceState.toUpperCase()
+    if (recording) return "Recording the screen"
     if (mirroring && camera !== "off") return "Mirroring · " + camera + " camera"
     if (mirroring) return "Mirroring screen"
     if (camera !== "off") return camera.toUpperCase() + " CAMERA LIVE"
+    if (wireless) return "Connected over Wi-Fi"
     return "Connected over USB"
   }
 
@@ -86,11 +97,14 @@ Panel {
 
   // Nerd Font: cellphone-link. Lit when anything is actively streaming.
   readonly property string phoneGlyph: "󰄜"
-  readonly property bool streaming: camera !== "off" || mirroring
+  readonly property bool streaming: camera !== "off" || mirroring || recording
 
   // ------------------------------------------------------------- actions
   function refresh() {
     if (statusProc.running) return
+    var command = [bin("dori-status"), "--device", videoDevice]
+    if (opened) command.push("--full")
+    statusProc.command = command
     statusProc.running = true
   }
 
@@ -122,6 +136,23 @@ Panel {
     return args
   }
 
+  function screenshot() {
+    if (ready) runAction([bin("dori-shot")])
+  }
+
+  function toggleRecording() {
+    if (!ready && !recording) return
+    runAction([bin("dori-record"), "toggle",
+               "--codec", root.codec,
+               "--bitrate", root.bitrate + "M"])
+  }
+
+  // Switching to Wi-Fi needs the cable in once; switching back only needs the
+  // network connection we already have.
+  function toggleWireless() {
+    runAction([bin("dori-wireless"), wireless ? "off" : "on"])
+  }
+
   function updateSetting(key, value) {
     var next = {}
     for (var k in root.settings) next[k] = root.settings[k]
@@ -144,7 +175,6 @@ Panel {
 
   Process {
     id: statusProc
-    command: [root.bin("dori-status"), "--device", root.videoDevice]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -163,8 +193,8 @@ Panel {
     onExited: settleTimer.restart()
   }
 
-  // scrcpy needs a beat to claim the sink or raise its window before the next
-  // status read tells the truth about it.
+  // scrcpy needs a beat to claim the sink, raise its window, or open the
+  // recording file before the next status read tells the truth about it.
   Timer {
     id: settleTimer
     interval: 700
@@ -240,16 +270,45 @@ Panel {
             Behavior on color { ColorAnimation { duration: 200 } }
           }
 
+          // Battery, when the phone is attached and the panel is open. It sits
+          // in the hero rather than a row of its own: it is context, not a
+          // control, and it is the first thing you look for before starting a
+          // long mirror session.
+          Row {
+            id: heroBattery
+            visible: root.batteryLevel >= 0
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(4)
+
+            Text {
+              text: root.charging ? "󰂄" : "󰁹"
+              color: root.charging ? root.foreground : root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              anchors.verticalCenter: parent.verticalCenter
+            }
+
+            Text {
+              text: root.batteryLevel + "%"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              anchors.verticalCenter: parent.verticalCenter
+            }
+          }
+
           Column {
             id: heroLabels
             anchors.left: heroIcon.right
             anchors.leftMargin: Style.space(14)
-            anchors.right: parent.right
+            anchors.right: heroBattery.visible ? heroBattery.left : parent.right
+            anchors.rightMargin: heroBattery.visible ? Style.space(10) : 0
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(2)
 
             Text {
-              text: root.model
+              text: root.android !== "" ? root.model + "  ·  Android " + root.android : root.model
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.title
@@ -417,6 +476,48 @@ Panel {
             }
           }
 
+          // Two things you want without a window in the way: a screenshot that
+          // lands on the clipboard, and a recording that keeps going while you
+          // use the phone normally.
+          Row {
+            id: captureRow
+            width: parent.width
+            spacing: Style.space(6)
+
+            readonly property real cellWidth: (width - spacing) / 2
+
+            Button {
+              width: captureRow.cellWidth
+              iconText: "󰹑"
+              iconSize: Style.font.title
+              text: "Screenshot"
+              fontSize: Style.font.bodySmall
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
+              bordered: true
+              enabled: root.ready
+              opacity: enabled ? 1 : 0.4
+              onClicked: root.screenshot()
+            }
+
+            Button {
+              width: captureRow.cellWidth
+              iconText: root.recording ? "󰓛" : "󰑊"
+              iconSize: Style.font.title
+              text: root.recording ? "Stop recording" : "Record"
+              fontSize: Style.font.bodySmall
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
+              bordered: true
+              active: root.recording
+              enabled: root.ready || root.recording
+              opacity: enabled ? 1 : 0.4
+              onClicked: root.toggleRecording()
+            }
+          }
+
           // Codec. Changing it while mirroring would not take effect until the
           // next start, so the row is locked during a session rather than
           // quietly lying about what is on screen.
@@ -498,6 +599,39 @@ Panel {
               root.updateSetting("screenOff", next)
               if (root.mirroring) root.runAction(root.mirrorArgs("restart", next))
             }
+          }
+        }
+
+        // -------------------------------------------- connection
+        PanelSeparator { foreground: root.foreground }
+
+        Column {
+          width: parent.width
+          spacing: Style.space(10)
+
+          PanelSectionHeader {
+            text: "CONNECTION"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          // adb over Wi-Fi. Turning it on needs the cable in once, so the row
+          // is only live when there is something to switch over — otherwise it
+          // is a switch that moves and does nothing.
+          Toggle {
+            width: parent.width
+            label: root.wireless ? "Connected over Wi-Fi" : "Work without the cable"
+            description: root.wireless
+              ? "The cable can come out — " + root.model + " stays reachable"
+              : (root.ready
+                 ? "Switch this phone to Wi-Fi, then unplug it"
+                 : "Plug the phone in once to switch it to Wi-Fi")
+            checked: root.wireless
+            enabled: root.ready || root.wireless
+            opacity: enabled ? 1 : 0.4
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: root.toggleWireless()
           }
         }
       }

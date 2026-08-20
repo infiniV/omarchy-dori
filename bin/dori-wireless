@@ -1,0 +1,108 @@
+#!/bin/bash
+# Move the adb connection onto Wi-Fi, so the cable can come out and the camera,
+# the mirror, and everything else keep working.
+#
+#   dori-wireless on | off | status
+#
+#   --port N   adb tcp port (default 5555)
+#
+# `on` needs the phone plugged in once: it switches the phone's adb daemon to
+# TCP, finds its address on the network, and connects to that. After it reports
+# success the cable is free.
+
+set -uo pipefail
+
+PORT=5555
+ACTION=""
+
+while (($# > 0)); do
+  case "$1" in
+    --port) PORT="${2:-5555}"; shift 2 ;;
+    -h | --help)
+      sed -n '2,12p' "$0"
+      exit 0
+      ;;
+    -*)
+      echo "dori-wireless: unknown flag $1" >&2
+      exit 1
+      ;;
+    *) ACTION="$1"; shift ;;
+  esac
+done
+ACTION="${ACTION:-status}"
+
+notify() { command -v notify-send >/dev/null 2>&1 && notify-send "$@"; }
+
+# A serial with a colon in it is an ip:port, which is adb's own way of saying
+# "this one is over the network".
+wireless_serial() {
+  adb devices 2>/dev/null | awk 'NR > 1 && $2 == "device" && $1 ~ /:/ {print $1; exit}'
+}
+
+usb_serial() {
+  adb devices 2>/dev/null | awk 'NR > 1 && $2 == "device" && $1 !~ /:/ {print $1; exit}'
+}
+
+phone_address() {
+  local serial=$1 ip
+  for iface in wlan0 wlan1; do
+    ip=$(adb -s "$serial" shell ip -f inet addr show "$iface" 2>/dev/null |
+      grep -oP 'inet \K[0-9.]+' | head -1)
+    [[ -n $ip ]] && { echo "$ip"; return 0; }
+  done
+  return 1
+}
+
+case "$ACTION" in
+  status)
+    w=$(wireless_serial)
+    u=$(usb_serial)
+    jq -n --arg w "${w:-}" --arg u "${u:-}" \
+      '{wireless: ($w != ""),
+        cable: ($u != ""),
+        address: (if $w == "" then null else $w end)}'
+    ;;
+
+  on)
+    if [[ -n "$(wireless_serial)" ]]; then
+      echo "dori-wireless: already connected over Wi-Fi at $(wireless_serial)"
+      exit 0
+    fi
+    serial=$(usb_serial)
+    if [[ -z $serial ]]; then
+      notify -u critical "Dori" "Plug the phone in once to switch it to Wi-Fi."
+      echo "dori-wireless: no phone on the cable" >&2
+      exit 1
+    fi
+    if ! ip=$(phone_address "$serial"); then
+      notify -u critical "Dori" "The phone has no Wi-Fi address. Connect it to a network first."
+      echo "dori-wireless: no wlan address on the phone" >&2
+      exit 1
+    fi
+
+    adb -s "$serial" tcpip "$PORT" >/dev/null 2>&1
+    sleep 1.5
+    if adb connect "$ip:$PORT" 2>&1 | grep -q "connected"; then
+      notify "Dori" "Connected over Wi-Fi at $ip. The cable can come out."
+      echo "$ip:$PORT"
+    else
+      notify -u critical "Dori" "Could not reach the phone at $ip:$PORT."
+      echo "dori-wireless: adb connect $ip:$PORT failed" >&2
+      exit 1
+    fi
+    ;;
+
+  off)
+    w=$(wireless_serial)
+    [[ -n $w ]] && adb disconnect "$w" >/dev/null 2>&1
+    # Put the phone's daemon back on USB so it is not listening on the network
+    # after we stop using it.
+    [[ -n "$(usb_serial)" ]] && adb -s "$(usb_serial)" usb >/dev/null 2>&1
+    notify "Dori" "Wi-Fi connection closed"
+    ;;
+
+  *)
+    echo "Usage: dori-wireless <on|off|status> [--port N]" >&2
+    exit 1
+    ;;
+esac

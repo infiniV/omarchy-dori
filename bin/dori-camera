@@ -53,13 +53,31 @@ MODE="${MODE:-cycle}"
 
 notify() { command -v notify-send >/dev/null 2>&1 && notify-send "$@"; }
 
+# Find processes by their actual executable name, then filter on an argument
+# substring. `pgrep -f` alone matches anything that merely mentions the string
+# — an editor with the script open, or the shell that launched this — and that
+# is the difference between "the camera is live" and "someone opened a file".
+proc_pids() { # $1 executable name, $2 argument substring
+  pgrep -a -x "$1" 2>/dev/null | awk -v m="$2" 'index($0, m) { print $1 }'
+}
+
+proc_args() { # $1 executable name, $2 argument substring
+  pgrep -a -x "$1" 2>/dev/null | awk -v m="$2" 'index($0, m) { print; exit }'
+}
+
+proc_kill() { # $1 executable name, $2 argument substring
+  local pids
+  pids=$(proc_pids "$1" "$2")
+  [[ -n $pids ]] && kill $pids 2>/dev/null
+  return 0
+}
+
 current_cam() {
-  pgrep -af -- "scrcpy.*--v4l2-sink=$DEVICE" 2>/dev/null |
-    grep -oP -- '--camera-id=\K\d+' | head -1
+  proc_args scrcpy "--v4l2-sink=$DEVICE" | grep -oP -- '--camera-id=\K\d+' | head -1
 }
 
 stop_stream() {
-  pkill -f -- "scrcpy.*--v4l2-sink=$DEVICE"
+  proc_kill scrcpy "--v4l2-sink=$DEVICE"
 }
 
 require_ready() {
