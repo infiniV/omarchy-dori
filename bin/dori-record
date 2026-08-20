@@ -103,15 +103,34 @@ case "$ACTION" in
     fi
     mkdir -p "$DIR"
     out="$DIR/phone-$(date +%Y%m%d-%H%M%S).mp4"
-    nohup scrcpy -s "$serial" --no-window --no-playback \
-      --record="$out" \
-      --video-codec="$CODEC" --video-bit-rate="$BITRATE" \
-      >"$LOG" 2>&1 &
-    disown
-    sleep 0.8
-    if [[ -z "$(proc_pids scrcpy "$MARKER")" ]]; then
+    # Over Wi-Fi scrcpy sometimes cannot push its server to the phone and dies
+    # on the spot. Try once more before calling it a failure.
+    for attempt in 1 2; do
+      nohup scrcpy -s "$serial" --no-window --no-playback \
+        --record="$out" \
+        --video-codec="$CODEC" --video-bit-rate="$BITRATE" \
+        >"$LOG" 2>&1 &
+      disown
+      sleep 1.2
+      [[ -n "$(proc_pids scrcpy "$MARKER")" ]] && break
+      ((attempt == 1)) && echo "dori-record: scrcpy died on launch, retrying" >&2
+    done
+    # scrcpy pushes its server to the phone before it records anything, and
+    # over Wi-Fi that push sometimes fails outright. Wait for the file to
+    # appear, and treat scrcpy exiting as the failure it is.
+    for _ in {1..24}; do
+      [[ -s $out ]] && break
+      if [[ -z "$(proc_pids scrcpy "$MARKER")" ]]; then
+        notify -u critical "Dori" "The recording did not start. See $LOG"
+        echo "dori-record: scrcpy exited before writing anything; see $LOG" >&2
+        rm -f "$out"
+        exit 1
+      fi
+      sleep 0.25
+    done
+    if [[ ! -s $out ]]; then
       notify -u critical "Dori" "The recording did not start. See $LOG"
-      echo "dori-record: scrcpy exited; see $LOG" >&2
+      echo "dori-record: no data after 6s; see $LOG" >&2
       exit 1
     fi
     notify "Dori" "Recording the phone screen"

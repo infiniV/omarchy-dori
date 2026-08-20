@@ -11,6 +11,7 @@
 #   --screen-off        blank the phone's own display while mirroring
 #   --no-screen-off     leave it on (default)
 #   --no-audio          do not forward phone audio
+#   --wifi-profile off  keep the given settings over Wi-Fi too
 #
 # The flags win over the PM_* environment variables, so the Dori panel can
 # pass settings without touching the environment.
@@ -28,6 +29,7 @@ FPS="${PM_FPS:-60}"
 MAXSIZE="${PM_MAXSIZE:-fit}"
 SCREEN_OFF="${PM_SCREEN_OFF:-}"
 AUDIO=1
+WIFI_PROFILE=1
 ACTION=""
 
 while (($# > 0)); do
@@ -39,6 +41,10 @@ while (($# > 0)); do
     --screen-off) SCREEN_OFF=1; shift ;;
     --no-screen-off) SCREEN_OFF=""; shift ;;
     --no-audio) AUDIO=0; shift ;;
+    --wifi-profile)
+      [[ ${2:-auto} == "off" ]] && WIFI_PROFILE=0
+      shift 2
+      ;;
     -h | --help)
       sed -n '2,17p' "$0"
       exit 0
@@ -138,6 +144,23 @@ fit_max_size() {
   echo $((usable - 110))
 }
 
+# Over Wi-Fi the settings that feel instant on the cable feel like a video call
+# with a bad line: the link is a tenth of the bandwidth and adds its own delay.
+# Cap the three things that matter, and say so, rather than letting it feel
+# broken.
+apply_wifi_profile() { # $1 serial
+  [[ $1 == *:* ]] || return 0
+  ((WIFI_PROFILE)) || return 0
+
+  local mbps="${BITRATE%[Mm]}"
+  if [[ $mbps =~ ^[0-9]+$ ]] && ((mbps > 8)); then
+    BITRATE="8M"
+  fi
+  ((FPS > 30)) && FPS=30
+  echo "dori-mirror: Wi-Fi profile — ${BITRATE}, ${FPS} fps, 1200px" >&2
+  WIFI_CAP=1200
+}
+
 start_mirror() {
   local serial
   serial=$(dori_serial)
@@ -147,39 +170,58 @@ start_mirror() {
     exit 1
   fi
 
+  apply_wifi_profile "$serial"
+
   local enc=() scroff=() audio=() encoder maxsize="$MAXSIZE"
   [[ $maxsize == "fit" ]] && maxsize=$(fit_max_size)
+  if [[ -n ${WIFI_CAP:-} ]] && [[ $maxsize == "0" || $maxsize -gt $WIFI_CAP ]]; then
+    maxsize=$WIFI_CAP
+  fi
   encoder=$(pick_encoder "$CODEC")
   [[ -n $encoder ]] && enc=(--video-encoder="$encoder")
   [[ -n $SCREEN_OFF ]] && scroff=(--turn-screen-off)
   ((AUDIO)) && audio=(--audio-codec=opus --audio-bit-rate=128K) || audio=(--no-audio)
 
-  nohup scrcpy -s "$serial" \
-    --window-title="$TITLE" \
-    --video-codec="$CODEC" "${enc[@]}" \
-    --video-bit-rate="$BITRATE" \
-    --max-fps="$FPS" \
-    --max-size="$maxsize" \
-    "${audio[@]}" \
-    --keyboard=uhid \
-    --stay-awake \
-    --power-off-on-close \
-    "${scroff[@]}" \
-    >"$LOG" 2>&1 &
-  disown
-
-  # Wait for the window, so a caller that starts then focuses has something to
-  # focus, and so a failure surfaces as "no window" rather than silence.
-  local i
-  for i in {1..24}; do
-    hyprctl clients -j 2>/dev/null |
-      jq -e --arg t "$TITLE" 'any(.[]; .title == $t)' >/dev/null 2>&1 && return 0
-    sleep 0.25
+  # Over Wi-Fi scrcpy sometimes cannot push its server to the phone and dies
+  # immediately. That is a flaky link, not a broken setup, so try once more
+  # before telling anyone about it.
+  local attempt
+  for attempt in 1 2; do
+    nohup scrcpy -s "$serial" \
+      --window-title="$TITLE" \
+      --video-codec="$CODEC" "${enc[@]}" \
+      --video-bit-rate="$BITRATE" \
+      --max-fps="$FPS" \
+      --max-size="$maxsize" \
+      "${audio[@]}" \
+      --keyboard=uhid \
+      --stay-awake \
+      --power-off-on-close \
+      "${scroff[@]}" \
+      >"$LOG" 2>&1 &
+    disown
+    sleep 1.5
+    [[ -n "$(running_pid)" ]] && break
+    ((attempt == 1)) && echo "dori-mirror: scrcpy died on launch, retrying" >&2
   done
 
-  notify -u critical "Dori" "The mirror did not open. See $LOG"
-  echo "dori-mirror: no window after 6s; see $LOG" >&2
-  exit 1
+  # Wait for the window, so a caller that starts then focuses has something to
+  # focus. Over Wi-Fi the first frame can take a good while longer than over the
+  # cable, so the only real failure is scrcpy exiting — a process still running
+  # is a mirror still opening, and saying otherwise was a lie the panel showed
+  # while the window was on its way.
+  local i
+  for i in {1..60}; do
+    hyprctl clients -j 2>/dev/null |
+      jq -e --arg t "$TITLE" 'any(.[]; .title == $t)' >/dev/null 2>&1 && return 0
+    [[ -z "$(running_pid)" ]] && {
+      notify -u critical "Dori" "The mirror did not open. See $LOG"
+      echo "dori-mirror: scrcpy exited before showing a window; see $LOG" >&2
+      exit 1
+    }
+    sleep 0.25
+  done
+  return 0
 }
 
 case "$ACTION" in

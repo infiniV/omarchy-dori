@@ -31,6 +31,13 @@ Panel {
   readonly property bool wireless: String(status.transport || "") === "wireless"
   readonly property bool relaying: status.relaying === true
 
+  // The phone as an extra monitor: a headless Hyprland output served over VNC.
+  readonly property var screen: status.screen || null
+  readonly property bool screenActive: screen ? screen.active === true : false
+  readonly property bool screenReady: screen ? screen.ready === true : false
+  readonly property string screenUrl: screen && screen.url ? String(screen.url) : ""
+  readonly property string screenQr: screen && screen.qr ? String(screen.qr) : ""
+
   // Battery is only in the blob while the panel is open — it costs an adb round
   // trip, and the bar icon has nowhere to show it anyway.
   readonly property var battery: status.battery || null
@@ -70,6 +77,9 @@ Panel {
   // back to the placeholder between frames.
   property bool showA: true
   property real frameAspect: 0.46
+  // dori-frame answers 2 when the phone's screen is off, which is not a failure
+  // — it is the reason there is nothing new to show.
+  property bool phoneScreenOff: false
   // Not while the mirror is up: the real window is right there, and polling the
   // phone for stills behind it would be work nobody asked for.
   readonly property bool previewVisible: livePreview && ready && !mirroring
@@ -176,6 +186,10 @@ Panel {
     runAction([bin("dori-wireless"), wireless ? "off" : "on"])
   }
 
+  function toggleScreen() {
+    runAction([bin("dori-display"), "toggle"])
+  }
+
   function toggleRelay() {
     runAction([bin("dori-notify"), "toggle"])
   }
@@ -219,6 +233,7 @@ Panel {
   // good one on screen rather than blanking the preview.
   Process {
     id: frameProc
+    onExited: function(code) { root.phoneScreenOff = code === 2 }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -234,7 +249,9 @@ Panel {
   // One frame every two and a half seconds, only while the panel is open. A
   // grab costs about a second of adb, so this is a slideshow on purpose.
   Timer {
-    interval: 2500
+    // Over Wi-Fi a frame costs more and the link is shared with everything else
+    // Dori is doing, so ask for fewer of them.
+    interval: root.wireless ? 4000 : 2500
     running: root.opened && root.previewVisible
     repeat: true
     triggeredOnStart: true
@@ -364,10 +381,43 @@ Panel {
           Text {
             anchors.centerIn: parent
             visible: frameA.status !== Image.Ready && frameB.status !== Image.Ready
+                     && !root.phoneScreenOff
             text: root.phoneGlyph
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.display
+          }
+
+          // A dark phone and a stale picture of a bright one look the same.
+          // Say which it is instead.
+          Rectangle {
+            anchors.fill: parent
+            visible: root.phoneScreenOff
+            color: Qt.rgba(0, 0, 0, 0.72)
+            radius: parent.radius
+
+            Column {
+              anchors.centerIn: parent
+              spacing: Style.space(6)
+
+              Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: "󰤄"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.display
+              }
+
+              Text {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: "Screen off"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                font.letterSpacing: 1.2
+              }
+            }
           }
         }
 
@@ -721,6 +771,84 @@ Panel {
               var next = !root.screenOff
               root.updateSetting("screenOff", next)
               if (root.mirroring) root.runAction(root.mirrorArgs("restart", next))
+            }
+          }
+        }
+
+        // ------------------------------------------ second screen
+        PanelSeparator { foreground: root.foreground }
+
+        Column {
+          width: parent.width
+          spacing: Style.space(10)
+
+          PanelSectionHeader {
+            text: "SECOND SCREEN"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          // This one does not need the cable, or even the same phone: it makes
+          // a headless output and serves it over VNC on a private address.
+          Toggle {
+            width: parent.width
+            label: "Use the phone as a display"
+            description: root.screenActive
+              ? "A fourth screen, to the right of the others"
+              : (root.screenReady
+                 ? "Adds a screen and serves it to any VNC app"
+                 : "Needs wayvnc installed")
+            checked: root.screenActive
+            enabled: root.screenReady || root.screenActive
+            opacity: enabled ? 1 : 0.4
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: root.toggleScreen()
+          }
+
+          // Scanning beats typing an address on a phone keyboard.
+          Row {
+            visible: root.screenActive && root.screenQr !== ""
+            width: parent.width
+            spacing: Style.space(12)
+
+            Rectangle {
+              width: Style.space(96)
+              height: width
+              radius: Style.cornerRadius
+              color: "white"
+
+              Image {
+                anchors.fill: parent
+                anchors.margins: Style.space(4)
+                source: root.screenQr !== "" ? "file://" + root.screenQr : ""
+                fillMode: Image.PreserveAspectFit
+                cache: false
+                smooth: false
+              }
+            }
+
+            Column {
+              width: parent.width - Style.space(108)
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(4)
+
+              Text {
+                text: "Scan it with any VNC app"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                font.bold: true
+              }
+
+              Text {
+                width: parent.width
+                text: root.screenUrl
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                elide: Text.ElideRight
+              }
             }
           }
         }

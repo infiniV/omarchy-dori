@@ -121,9 +121,14 @@ start_stream() {
     >"$LOG" 2>&1 &
   disown
 
-  # scrcpy fails asynchronously — a bad camera id or a busy sink shows up a
-  # beat later in the log, not in the exit code of the launch.
-  sleep 0.6
+  # scrcpy fails asynchronously — a bad camera id or a busy sink shows up a beat
+  # later in the log, not in the exit code of the launch. Over Wi-Fi that beat
+  # is several seconds, so wait for the sink rather than guessing at it.
+  local i
+  for i in {1..24}; do
+    [[ -n "$(current_cam)" ]] && break
+    sleep 0.4
+  done
   if [[ -z "$(current_cam)" ]]; then
     notify -u critical "Dori" "Camera stream failed to start. See $LOG"
     echo "dori-camera: stream did not come up; see $LOG" >&2

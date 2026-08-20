@@ -18,6 +18,10 @@ you charge with.
   `~/Pictures/dori`, because the reason you took it is usually to paste it.
 - **Record** — the phone's screen to an mp4 in the background, with no mirror
   window in the way, while you keep using the phone.
+- **A fourth screen** — the phone as an extra monitor, to the right of the
+  others. Dori adds a headless Hyprland output at the phone's own resolution and
+  serves it over VNC on a private address; scan the QR in the panel with any VNC
+  app and drag a window onto it.
 - **Notifications** — the phone's notifications, on this desktop. No app to
   install on the phone, no account in the middle: adb can already read them.
 - **No cable** — switch the connection to Wi-Fi and unplug. Everything above
@@ -37,6 +41,7 @@ in the way.
 | Phone | Android 12 or newer for the camera; any adb-capable Android for the mirror |
 | Packages | `scrcpy`, `android-tools`, `v4l-utils`, `v4l2loopback-dkms` |
 | Optional | `wl-clipboard`, so a screenshot lands on the clipboard as well as on disk |
+| Optional | `wayvnc` and `qrencode`, for the second screen, plus a VNC app on the phone |
 | On the phone | USB debugging enabled in Developer options |
 
 `bin/dori-setup` installs the packages for you on Arch and Omarchy.
@@ -70,6 +75,31 @@ live.
 | Right click | cycle the camera: off → back → front → off |
 | Middle click | start or focus the screen mirror |
 | Panel | all of it, plus screenshot, recording, notifications, codec, bitrate, and Wi-Fi |
+
+**The fourth screen.** Turn on *Use the phone as a display*, scan the QR with a
+VNC app (AVNC and bVNC both work), and Hyprland has one more monitor. The screen
+is served on the Tailscale address when Tailscale is up and on the LAN address
+otherwise — never on `0.0.0.0`. wayvnc runs without a password, so anyone
+already on that network can connect: leave it off on networks you do not trust.
+Turning it off stops wayvnc and removes the output, and Hyprland moves the
+workspaces back on its own.
+
+**What Wi-Fi costs.** Android throttles the Wi-Fi radio while the phone's screen
+is off, and adb rides that radio, so everything slows down — a screen grab that
+takes a second on the cable can take thirty. Dori works around it rather than
+pretending it is not there:
+
+- the mirror drops to 8 Mbps, 30 fps and 1200 px over Wi-Fi, which is the
+  difference between a delayed video call and a usable screen (`--wifi-profile
+  off` keeps your settings)
+- the live preview asks the phone whether its screen is even on, and says
+  *Screen off* instead of spending thirty seconds fetching a black rectangle
+- scrcpy occasionally fails to push its server over a flaky link; the mirror and
+  the recorder each retry once before complaining
+- long transfers are bounded, so a bad moment on the network never leaves a
+  stuck process behind
+
+Wake the phone and Wi-Fi picks straight back up.
 
 **Notifications.** Turn on *Relay notifications* and what appears on the phone
 appears here. Ongoing notifications — music players, downloads, "app is
@@ -115,6 +145,7 @@ bin/dori-mirror start|toggle|focus|stop|restart [--codec h265] [--bitrate 30M]
 bin/dori-shot                   # screenshot to ~/Pictures/dori and the clipboard
 bin/dori-frame --slot a         # one low-res frame, for the panel's preview
 bin/dori-notify start|stop|toggle|status|once
+bin/dori-display on|off|toggle|status   # the phone as a fourth screen
 bin/dori-record start|stop|toggle|status
 bin/dori-wireless on|off|status
 bin/dori-setup [--uninstall]
@@ -135,6 +166,9 @@ shared `/tmp` path.
 | Mirror opens then dies | see `$XDG_RUNTIME_DIR/dori/mirror.log` |
 | "Work without the cable" is greyed out | it needs the phone on the cable once, to switch it over |
 | Wi-Fi connects, then drops later | phones reset adb over TCP on reboot and on some Wi-Fi changes; plug in and switch again |
+| Everything is slow over Wi-Fi | the phone's screen is off; wake it. Android throttles the radio while it sleeps |
+| The mirror opens but lags over Wi-Fi | it is already on the lighter profile; drop the bitrate further, or plug the cable back in |
+| The display toggle is greyed out | `wayvnc` is missing, or installed and broken — an AUR build left behind by a library upgrade fails at exec time. `sudo pacman -S extra/wayvnc` |
 | Everything fails with "more than one device" | it should not — every script names one device, preferring the cable. Set `DORI_SERIAL` if you have two phones and want the other one |
 | A recording will not play | it was killed rather than stopped; use the panel or `dori-record stop`, which lets scrcpy finalise the file |
 

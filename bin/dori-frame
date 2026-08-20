@@ -4,9 +4,14 @@
 #
 #   dori-frame [--slot a|b] [--out PATH] [--width 320]
 #
+# Exit codes: 0 wrote a frame, 1 no phone or the grab failed, 2 the phone's
+# screen is off, so there is nothing worth fetching.
+#
 # --slot writes $XDG_RUNTIME_DIR/dori/frame-<slot>.png and prints the path. A
 # caller that alternates slots always hands its image loader a URL it has not
 # cached, which is how the panel gets a moving picture out of still frames.
+#
+# A grab that takes too long is abandoned rather than waited on.
 #
 # The frame is written atomically, so a panel reading the file never catches it
 # half-written, and a grab that comes back empty leaves the previous frame in
@@ -50,10 +55,32 @@ dori_serial() {
 SERIAL=$(dori_serial)
 [[ -n $SERIAL ]] || exit 1
 
+# Android throttles Wi-Fi hard while the screen is off, which turns a one
+# megabyte grab into a thirty second one — for a picture of a screen that is not
+# showing anything. Ask first: the question costs a few bytes, the answer saves
+# the transfer. If the phone will not say, assume the screen is on, because a
+# slow preview beats no preview.
+screen_on() {
+  local answer
+  answer=$(timeout 3 adb -s "$SERIAL" shell dumpsys deviceidle get screen 2>/dev/null | tr -d '\r\n')
+  [[ $answer == "true" ]] && return 0
+  [[ $answer == "false" ]] && return 1
+
+  answer=$(timeout 3 adb -s "$SERIAL" shell dumpsys power 2>/dev/null |
+    grep -m1 -oE 'Display Power: state=[A-Z]+')
+  [[ $answer == *OFF* ]] && return 1
+  return 0
+}
+
+screen_on || exit 2
+
 mkdir -p "$(dirname "$OUT")"
 tmp="$OUT.part"
 
-adb -s "$SERIAL" exec-out screencap -p >"$tmp" 2>/dev/null
+# With the phone's screen off, Android throttles Wi-Fi and a one-megabyte grab
+# can take half a minute. Give up early instead: the panel keeps the frame it
+# already has, which is a better answer than a stalled process.
+timeout 8 adb -s "$SERIAL" exec-out screencap -p >"$tmp" 2>/dev/null
 # A phone mid-unlock, mid-rotation, or busy answers with nothing at all.
 if [[ ! -s $tmp ]]; then
   rm -f "$tmp"

@@ -52,7 +52,8 @@ out="$DIR/phone-$(date +%Y%m%d-%H%M%S).png"
 
 # exec-out keeps the PNG bytes intact; `adb shell screencap` mangles them on
 # some devices by translating line endings.
-if ! adb -s "$SERIAL" exec-out screencap -p >"$out" 2>/dev/null || [[ ! -s $out ]]; then
+# Over Wi-Fi with the screen off this can crawl; wait, but not forever.
+if ! timeout 25 adb -s "$SERIAL" exec-out screencap -p >"$out" 2>/dev/null || [[ ! -s $out ]]; then
   rm -f "$out"
   notify -u critical "Dori" "The screenshot failed."
   echo "dori-shot: screencap produced nothing" >&2
