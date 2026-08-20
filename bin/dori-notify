@@ -40,9 +40,9 @@ while (($# > 0)); do
 done
 ACTION="${ACTION:-status}"
 
-# The daemon is this same script, re-executed with a marker argument. `pgrep -x`
-# matches a shebang script by its own filename, so the marker is enough to find
-# it again — no pid file, nothing in a shared directory to trust.
+# The daemon is this same script, re-executed with a marker argument, as the
+# dori-notify user unit. The unit name is how it is found again — not the
+# marker, not the script name, no pid file in a shared directory to trust.
 MARKER="__relay"
 SELF="$(realpath "$0")"
 
@@ -59,8 +59,28 @@ dori_serial() {
     END { if (!found && wireless) print wireless }'
 }
 
-proc_pids() {
-  pgrep -a -x "$(basename "$SELF")" 2>/dev/null | awk -v m="$MARKER" 'index($0, m) { print $1 }'
+relaying() { dori_unit_active notify; }
+
+# Deliver one phone notification to the desktop. Not with notify-send: its
+# arguments sit in /proc/<pid>/cmdline while it runs, world-readable, and the
+# arguments here are the user's messages. This makes the same D-Bus call with
+# the text fed over stdin, so the content never appears on any command line.
+# The python program itself is static — only "the shape", never the words.
+send_notification() { # $1 app, $2 title, $3 body — on stdin, NUL-separated
+  printf '%s\0%s\0%s' "$1" "$2" "$3" | /usr/bin/python3 -c '
+import sys, gi
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio, GLib
+app, title, body = (sys.stdin.buffer.read().decode("utf-8", "replace").split("\0") + ["", "", ""])[:3]
+Gio.bus_get_sync(Gio.BusType.SESSION, None).call_sync(
+    "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+    "org.freedesktop.Notifications", "Notify",
+    GLib.Variant("(susssasa{sv}i)", (app, 0, "", title, body, [], {}, -1)),
+    None, Gio.DBusCallFlags.NONE, -1, None)
+' 2>/dev/null && return 0
+  # No usable python-gobject (dori-setup installs it; this is a bare fallback):
+  # say that something arrived, without the content, rather than leak it.
+  command -v notify-send >/dev/null 2>&1 && notify-send -a "$1" -- "$1" "New notification on the phone"
 }
 
 # A package name is not a name. Translate the ones people actually have, and
@@ -148,7 +168,7 @@ show_new() { # $1: 1 to notify, 0 to prime silently
     [[ -n ${shown[$hash]:-} ]] && continue
     shown[$hash]=1
     if ((notify)) && ! grep -qxF "$hash" "$SEEN" 2>/dev/null; then
-      notify-send -a "$(app_name "$pkg")" -- "${title:-$(app_name "$pkg")}" "$text"
+      send_notification "$(app_name "$pkg")" "${title:-$(app_name "$pkg")}" "$text"
     fi
   done < <(read_notifications)
 
@@ -159,31 +179,30 @@ show_new() { # $1: 1 to notify, 0 to prime silently
 
 case "$ACTION" in
   status)
-    pids=$(proc_pids)
-    jq -n --argjson running "$([[ -n $pids ]] && echo true || echo false)" '{relaying: $running}'
+    jq -n --argjson running "$(relaying && echo true || echo false)" '{relaying: $running}'
     ;;
 
   once) show_new 1 ;;
 
   stop)
-    pids=$(proc_pids)
-    [[ -n $pids ]] && kill $pids 2>/dev/null
+    dori_unit_stop notify
     command -v notify-send >/dev/null 2>&1 && notify-send "Dori" "Notification relay off"
     exit 0
     ;;
 
   start)
-    if [[ -n "$(proc_pids)" ]]; then
+    if relaying; then
       echo "dori-notify: already relaying" >&2
       exit 0
     fi
+    dori_require_user_systemd || exit 1
     # Prime quietly, so turning the relay on does not replay everything that is
     # already sitting in the phone's shade.
     show_new 0
-    nohup "$SELF" "$MARKER" --interval "$INTERVAL" >>"$RUNDIR/notify.log" 2>&1 &
-    disown
+    dori_unit_start notify "$RUNDIR/notify.log" "Dori notification relay" \
+      "$SELF" "$MARKER" --interval "$INTERVAL"
     sleep 0.4
-    if [[ -z "$(proc_pids)" ]]; then
+    if ! relaying; then
       echo "dori-notify: the relay did not start; see $RUNDIR/notify.log" >&2
       exit 1
     fi
@@ -191,7 +210,7 @@ case "$ACTION" in
     ;;
 
   toggle)
-    if [[ -n "$(proc_pids)" ]]; then exec "$SELF" stop; else exec "$SELF" start --interval "$INTERVAL"; fi
+    if relaying; then exec "$SELF" stop; else exec "$SELF" start --interval "$INTERVAL"; fi
     ;;
 
   "$MARKER")

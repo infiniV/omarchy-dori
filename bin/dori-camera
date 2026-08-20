@@ -68,31 +68,24 @@ dori_serial() {
 
 notify() { command -v notify-send >/dev/null 2>&1 && notify-send "$@"; }
 
-# Find processes by their actual executable name, then filter on an argument
-# substring. `pgrep -f` alone matches anything that merely mentions the string
-# — an editor with the script open, or the shell that launched this — and that
-# is the difference between "the camera is live" and "someone opened a file".
-proc_pids() { # $1 executable name, $2 argument substring
-  pgrep -a -x "$1" 2>/dev/null | awk -v m="$2" 'index($0, m) { print $1 }'
-}
-
-proc_args() { # $1 executable name, $2 argument substring
-  pgrep -a -x "$1" 2>/dev/null | awk -v m="$2" 'index($0, m) { print; exit }'
-}
-
-proc_kill() { # $1 executable name, $2 argument substring
-  local pids
-  pids=$(proc_pids "$1" "$2")
-  [[ -n $pids ]] && kill $pids 2>/dev/null
-  return 0
-}
-
+# The camera stream Dori owns is the dori-camera user unit, and nothing else.
+# Another scrcpy writing to a v4l2 sink on this login is not Dori's to stop.
+# The unit's Description remembers which camera is live.
 current_cam() {
-  proc_args scrcpy "--v4l2-sink=$DEVICE" | grep -oP -- '--camera-id=\K\d+' | head -1
+  dori_unit_description camera | grep -oP -- 'camera \K\d+' | head -1
 }
 
 stop_stream() {
-  proc_kill scrcpy "--v4l2-sink=$DEVICE"
+  dori_unit_stop camera
+}
+
+# Whether the unit's scrcpy has the loopback node open. Read-only: the pid is
+# looked at, never signalled, so a recycled pid can at worst delay the answer.
+sink_open() {
+  local pid
+  pid=$(systemctl --user show "$(dori_unit camera)" -p MainPID --value 2>/dev/null)
+  [[ $pid =~ ^[0-9]+$ && $pid -gt 0 ]] || return 1
+  ls -l /proc/"$pid"/fd 2>/dev/null | grep -qF -- " $DEVICE"
 }
 
 require_ready() {
@@ -116,22 +109,30 @@ start_stream() {
     rotate=(--capture-orientation="$FRONT_ROTATION")
 
   require_ready
-  nohup scrcpy -s "$(dori_serial)" --video-source=camera --camera-id="$cam" \
+  dori_require_user_systemd || exit 1
+  : >"$LOG"
+  dori_unit_start camera "$LOG" "Dori camera $cam ($label) on $DEVICE" \
+    scrcpy -s "$(dori_serial)" --video-source=camera --camera-id="$cam" \
     --camera-ar=16:9 --max-size="$MAX_SIZE" --max-fps="$FPS" \
     "${rotate[@]}" \
-    --v4l2-sink="$DEVICE" --no-audio --no-window \
-    >"$LOG" 2>&1 &
-  disown
+    --v4l2-sink="$DEVICE" --no-audio --no-window || {
+    echo "dori-camera: could not start the dori-camera unit" >&2
+    exit 1
+  }
 
   # scrcpy fails asynchronously — a bad camera id or a busy sink shows up a beat
-  # later in the log, not in the exit code of the launch. Over Wi-Fi that beat
-  # is several seconds, so wait for the sink rather than guessing at it.
+  # later, not in the exit code of the launch, and its log is block-buffered
+  # until it exits so there is nothing to read there. The stream is up when
+  # the unit's process has the sink open. Over Wi-Fi that takes several
+  # seconds, so wait for it rather than guessing.
   local i
   for i in {1..24}; do
-    [[ -n "$(current_cam)" ]] && break
+    dori_unit_active camera || break
+    sink_open && break
     sleep 0.4
   done
-  if [[ -z "$(current_cam)" ]]; then
+  if ! dori_unit_active camera || ! sink_open; then
+    stop_stream
     notify -u critical "Dori" "Camera stream failed to start. See $LOG"
     echo "dori-camera: stream did not come up; see $LOG" >&2
     exit 1

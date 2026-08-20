@@ -17,7 +17,6 @@ set -uo pipefail
 . "$(dirname "$(readlink -f "$0")")/dori-lib.sh" || exit 1
 
 DEVICE="${DORI_V4L2_DEVICE:-/dev/video10}"
-TITLE="Dori Mirror"
 RUNDIR=$(dori_rundir) || exit 1
 FULL=0
 
@@ -35,18 +34,6 @@ while (($# > 0)); do
       ;;
   esac
 done
-
-# Find processes by their actual executable name, then filter on an argument
-# substring. `pgrep -f` alone matches anything that merely mentions the string
-# — an editor with the script open, or the shell that launched this — and that
-# is the difference between "the camera is live" and "someone opened a file".
-proc_pids() {
-  pgrep -a -x "$1" 2>/dev/null | awk -v m="$2" 'index($0, m) { print $1 }'
-}
-
-proc_args() {
-  pgrep -a -x "$1" 2>/dev/null | awk -v m="$2" 'index($0, m) { print; exit }'
-}
 
 # The first device adb lists, including the unusable ones: "unauthorized" is the
 # single most common reason nothing works, and it deserves to be said out loud
@@ -104,7 +91,7 @@ elif ((FULL)) && [[ $state == "device" && -n $serial ]]; then
 fi
 
 # Which camera the running scrcpy is sinking into the loopback node, if any.
-camera_id=$(proc_args scrcpy "--v4l2-sink=$DEVICE" | grep -oP -- '--camera-id=\K\d+' | head -1)
+camera_id=$(dori_unit_description camera | grep -oP -- 'camera \K\d+' | head -1)
 
 # A loopback node that does not exist means v4l2loopback was never loaded.
 loopback=false
@@ -117,16 +104,17 @@ if [[ $loopback == true ]] && command -v v4l2-ctl >/dev/null 2>&1; then
 fi
 
 mirroring=false
-[[ -n "$(proc_pids scrcpy "--window-title=$TITLE")" ]] && mirroring=true
+dori_unit_active mirror && mirroring=true
 
 # The notification relay is this project's own daemon, found the same way.
 relaying=false
-[[ -n "$(proc_pids dori-notify "__relay")" ]] && relaying=true
+dori_unit_active notify && relaying=true
 
 # Only the recording Dori started. Another scrcpy writing an mp4 on this login
 # is someone else's, and reporting it here would put a stop button in front of
 # a recording this plugin has no business ending.
-recording_file=$(dori_record_file "$RUNDIR")
+recording_file=$(dori_unit_description record)
+recording_file=${recording_file#Dori recording to }
 
 jq -n \
   --arg state "$state" \

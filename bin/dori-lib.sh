@@ -26,55 +26,70 @@ dori_rundir() {
   printf '%s\n' "$dir"
 }
 
-# Field 22 of /proc/<pid>/stat: the moment the process started, in clock ticks
-# since boot. Together with the pid it names one process for good — a recycled
-# pid cannot match it. The comm field is parenthesised and may itself contain
-# spaces or brackets, so strip up to the last ") " before counting fields.
-dori_proc_starttime() {
-  local stat
-  { stat=$(</proc/"$1"/stat); } 2>/dev/null || return 1
-  stat=${stat##*") "}
-  awk '{print $20}' <<<"$stat"
-}
-
-# Remember the recording Dori just started: pid, start time, output file.
-dori_record_write() {
-  local rundir=$1 pid=$2 file=$3 start
-  start=$(dori_proc_starttime "$pid") || return 1
-  printf '%s %s %s\n' "$pid" "$start" "$file" >"$rundir/record.pid"
-}
-
-dori_record_forget() {
-  rm -f "$1/record.pid"
-}
-
-# The recording Dori owns, as "<pid> <file>", or nothing at all.
+# Everything Dori keeps running — the camera stream, the mirror, a recording,
+# the notification relay — runs as a transient systemd user unit with a fixed
+# name: dori-camera, dori-mirror, dori-record, dori-notify.
 #
-# A scrcpy command line containing --record= is not proof of anything: another
-# scrcpy recording on this login belongs to whoever started it, and stopping it
-# would cost them their video. So the only recording Dori will report on or
-# stop is the process it started itself, still alive, still scrcpy, still with
-# the start time it had when it was written down.
-dori_record_live() {
-  local pidfile="$1/record.pid" pid start file
-  [[ -r $pidfile ]] || return 1
-  read -r pid start file <"$pidfile" || return 1
-  [[ $pid =~ ^[0-9]+$ && -n $start && -n $file ]] || return 1
-  [[ -d /proc/$pid ]] || return 1
-  [[ "$(stat -c %u "/proc/$pid" 2>/dev/null)" == "$(id -u)" ]] || return 1
-  [[ "$(cat /proc/"$pid"/comm 2>/dev/null)" == "scrcpy" ]] || return 1
-  [[ "$(dori_proc_starttime "$pid")" == "$start" ]] || return 1
-  printf '%s %s\n' "$pid" "$file"
+# That is the whole ownership model. Dori never looks for its processes by
+# name, argument, or pid: a unit called dori-mirror was started by Dori and
+# nothing else, and `systemctl --user stop dori-mirror` signals that unit's
+# cgroup, so there is no pid to validate and no window in which the pid could
+# have been recycled. Another scrcpy on this login — however it was started,
+# whatever its command line says — is not in that unit and cannot be touched.
+#
+# The unit's Description carries the one fact about each service that the
+# panel wants back (which camera, which file), so it reads in `systemctl
+# --user status` too.
+
+dori_unit() { printf 'dori-%s.service\n' "$1"; }
+
+dori_unit_active() {
+  systemctl --user is-active --quiet "$(dori_unit "$1")" 2>/dev/null
 }
 
-dori_record_pid() {
-  local live
-  live=$(dori_record_live "$1") || return 1
-  printf '%s\n' "${live%% *}"
+dori_unit_description() {
+  dori_unit_active "$1" || return 1
+  systemctl --user show "$(dori_unit "$1")" -p Description --value 2>/dev/null
 }
 
-dori_record_file() {
-  local live
-  live=$(dori_record_live "$1") || return 1
-  printf '%s\n' "${live#* }"
+# dori_unit_start NAME LOG DESCRIPTION COMMAND...
+#
+# Output goes to LOG so "see $LOG" in the error messages stays true. The user
+# manager already has the session's display variables; the adb and scrcpy
+# knobs, and PATH, are copied from the caller — only the ones that are set,
+# because an empty ADB_SERVER_SOCKET is not the same as an absent one.
+dori_unit_start() {
+  local name=$1 log=$2 desc=$3
+  shift 3
+  local env=() var
+  for var in PATH ADB_SERVER_SOCKET ANDROID_ADB_SERVER_PORT ANDROID_ADB_SERVER_ADDRESS \
+    ADB_TRACE SCRCPY_SERVER_PATH SCRCPY_ICON_PATH WAYLAND_DISPLAY DISPLAY \
+    HYPRLAND_INSTANCE_SIGNATURE SDL_VIDEODRIVER; do
+    [[ -n ${!var:-} ]] && env+=(-E "$var")
+  done
+  # A unit that died and was not collected would block the name. --collect
+  # keeps that from happening; reset-failed covers a unit started without it.
+  systemctl --user reset-failed "$(dori_unit "$name")" 2>/dev/null
+  systemd-run --user --unit="dori-$name" --collect --quiet \
+    -p Description="$desc" \
+    -p StandardOutput=append:"$log" -p StandardError=inherit \
+    -p TimeoutStopSec=20 \
+    "${env[@]}" -- "$@"
+}
+
+# Stop the unit and wait for it to be gone. SIGTERM first, so scrcpy can
+# finalise a recording; SIGKILL only after TimeoutStopSec.
+dori_unit_stop() {
+  dori_unit_active "$1" || return 0
+  systemctl --user stop "$(dori_unit "$1")" 2>/dev/null
+}
+
+dori_require_user_systemd() {
+  # "degraded" or "starting" exit non-zero but still mean the manager is there;
+  # only no answer, or "offline", means there is no user session to run in.
+  local state
+  state=$(systemctl --user is-system-running 2>/dev/null)
+  [[ -n $state && $state != "offline" ]] && return 0
+  echo "dori: no systemd user session; Dori runs its services as user units and cannot start without one" >&2
+  return 1
 }

@@ -60,13 +60,14 @@ if command -v pacman >/dev/null 2>&1; then
   command -v adb >/dev/null 2>&1 || missing+=(android-tools)
   command -v v4l2-ctl >/dev/null 2>&1 || missing+=(v4l-utils)
   modinfo v4l2loopback >/dev/null 2>&1 || missing+=(v4l2loopback-dkms)
+  /usr/bin/python3 -c 'import gi' 2>/dev/null || missing+=(python-gobject)
   if ((${#missing[@]})); then
     echo "  installing: ${missing[*]}"
     sudo pacman -S --needed "${missing[@]}" || exit 1
   fi
-  ok "scrcpy, android-tools, v4l-utils, v4l2loopback-dkms present"
+  ok "scrcpy, android-tools, v4l-utils, v4l2loopback-dkms, python-gobject present"
 else
-  warn "not an Arch system; install scrcpy, android-tools, v4l-utils and v4l2loopback yourself"
+  warn "not an Arch system; install scrcpy, android-tools, v4l-utils, v4l2loopback and python-gobject yourself"
 fi
 
 say "2. Persistent webcam device (/dev/video$VIDEO_NR)"

@@ -124,6 +124,15 @@ bin/dori-setup [--uninstall]
 Every script takes `--help`. Logs go to `$XDG_RUNTIME_DIR/dori/`, never to a
 shared `/tmp` path.
 
+Everything that keeps running — the camera stream, the mirror, a recording, the
+notification relay — is a transient systemd user unit named `dori-camera`,
+`dori-mirror`, `dori-record`, or `dori-notify`. So the usual tools apply:
+
+```bash
+systemctl --user status 'dori-*'
+systemctl --user stop dori-mirror
+```
+
 ## When it does not work
 
 | What you see | What it means |
@@ -133,7 +142,8 @@ shared `/tmp` path.
 | Back and front buttons are swapped | set the camera ids in settings, from `scrcpy --list-cameras` |
 | Front camera is upside down | set front camera rotation to `180` |
 | Camera buttons do nothing on an older phone | camera capture needs Android 12; the mirror still works |
-| Mirror opens then dies | see `$XDG_RUNTIME_DIR/dori/mirror.log` |
+| Mirror opens then dies | see `$XDG_RUNTIME_DIR/dori/mirror.log`, or `systemctl --user status dori-mirror` |
+| "no systemd user session" | the scripts run their services as user units; from a bare ssh login, start them from the desktop session instead |
 | "Work without the cable" is greyed out | it needs the phone on the cable once, to switch it over |
 | Wi-Fi connects, then drops later | phones reset adb over TCP on reboot and on some Wi-Fi changes; plug in and switch again |
 | Everything is slow over Wi-Fi | the phone's screen is off; wake it. Android throttles the radio while it sleeps |
@@ -158,8 +168,16 @@ Dori is a QML panel plus a handful of bash scripts. It starts `scrcpy`, reads
 - `dori-wireless` is the only part that puts anything on the network: it is
   Android's own adb-over-TCP, off by default, switched on by you, and closed
   again by the same toggle.
+- Dori only ever stops what it started. Each long-running piece is a systemd
+  user unit with a fixed name, and stop means `systemctl --user stop` on that
+  unit. Dori never finds its processes by name, command line, or pid, so a
+  `scrcpy` you started yourself — even one recording, even one writing to the
+  same webcam node — is invisible to it and cannot be signalled by it, and
+  there is no pid to validate and race against.
 - The preview frames and the notification hashes live in `$XDG_RUNTIME_DIR`:
-  your user only, in memory, gone at logout. Screenshots and recordings go where
+  your user only, in memory, gone at logout. The notification text itself is
+  handed to the desktop over D-Bus with the content on stdin — never on a
+  command line, where any local user could read it out of /proc while it runs. Screenshots and recordings go where
   you would expect, under `~/Pictures` and `~/Videos`.
 
 ## Uninstall

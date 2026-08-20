@@ -55,11 +55,15 @@ dori_serial() {
 
 notify() { command -v notify-send >/dev/null 2>&1 && notify-send "$@"; }
 
-# The running recording, or nothing. Only ever the process this script started
-# — see dori_record_live in dori-lib.sh for why a --record= command line is not
-# enough to go on.
-current_pid() { dori_record_pid "$RUNDIR"; }
-current_file() { dori_record_file "$RUNDIR"; }
+# The recording Dori owns is the dori-record user unit, and nothing else. A
+# scrcpy with --record= on its command line is not proof of anything: another
+# recording on this login belongs to whoever started it, and stopping it would
+# cost them their video. The unit's Description remembers the output file.
+current_file() {
+  local desc
+  desc=$(dori_unit_description record) || return 1
+  printf '%s\n' "${desc#Dori recording to }"
+}
 
 case "$ACTION" in
   status)
@@ -68,26 +72,25 @@ case "$ACTION" in
       '{recording: ($file != ""), file: (if $file == "" then null else $file end)}'
     ;;
   stop)
-    pid=$(current_pid)
     file=$(current_file)
-    if [[ -n $pid ]]; then
-      kill "$pid" 2>/dev/null
-      # Give scrcpy a moment to write the container index, then say where it is.
-      for _ in {1..12}; do
-        [[ -z "$(current_pid)" ]] && break
-        sleep 0.25
-      done
-      dori_record_forget "$RUNDIR"
-      notify "Dori" "Recording saved to ${file:-$DIR}"
-      echo "${file:-}"
+    if [[ -z $file ]]; then
+      echo "dori-record: no recording started by Dori is running" >&2
+      exit 0
     fi
+    # systemctl stop sends SIGTERM and waits, so scrcpy gets to write the
+    # container index before this returns and the file is playable by the
+    # time anyone is told where it is.
+    dori_unit_stop record
+    notify "Dori" "Recording saved to $file"
+    echo "$file"
     ;;
   start | toggle)
-    if [[ -n "$(current_pid)" ]]; then
+    if [[ -n "$(current_file)" ]]; then
       [[ $ACTION == "toggle" ]] && exec "$0" stop --dir "$DIR"
       echo "dori-record: already recording $(current_file)" >&2
       exit 0
     fi
+    dori_require_user_systemd || exit 1
     serial=$(dori_serial)
     if [[ -z $serial ]]; then
       notify -u critical "Dori" "No phone over adb."
@@ -96,21 +99,19 @@ case "$ACTION" in
     fi
     mkdir -p "$DIR"
     out="$DIR/phone-$(date +%Y%m%d-%H%M%S).mp4"
+    : >"$LOG"
     # Over Wi-Fi scrcpy sometimes cannot push its server to the phone and dies
     # on the spot. Try once more before calling it a failure.
     for attempt in 1 2; do
-      nohup scrcpy -s "$serial" --no-window --no-playback \
+      dori_unit_start record "$LOG" "Dori recording to $out" \
+        scrcpy -s "$serial" --no-window --no-playback \
         --record="$out" \
-        --video-codec="$CODEC" --video-bit-rate="$BITRATE" \
-        >"$LOG" 2>&1 &
-      pid=$!
-      disown
-      # nohup execs scrcpy, so $! is scrcpy itself. Write it down before the
-      # wait: this pid, and nothing else, is what stop and status act on.
-      dori_record_write "$RUNDIR" "$pid" "$out"
+        --video-codec="$CODEC" --video-bit-rate="$BITRATE" || {
+        echo "dori-record: could not start the dori-record unit" >&2
+        exit 1
+      }
       sleep 1.2
-      [[ -n "$(current_pid)" ]] && break
-      dori_record_forget "$RUNDIR"
+      dori_unit_active record && break
       ((attempt == 1)) && echo "dori-record: scrcpy died on launch, retrying" >&2
     done
     # scrcpy pushes its server to the phone before it records anything, and
@@ -118,8 +119,7 @@ case "$ACTION" in
     # appear, and treat scrcpy exiting as the failure it is.
     for _ in {1..24}; do
       [[ -s $out ]] && break
-      if [[ -z "$(current_pid)" ]]; then
-        dori_record_forget "$RUNDIR"
+      if ! dori_unit_active record; then
         notify -u critical "Dori" "The recording did not start. See $LOG"
         echo "dori-record: scrcpy exited before writing anything; see $LOG" >&2
         rm -f "$out"
