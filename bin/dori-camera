@@ -51,6 +51,19 @@ while (($# > 0)); do
 done
 MODE="${MODE:-cycle}"
 
+# With the cable in and Wi-Fi on at the same time, adb sees two devices and
+# every bare adb call fails with "more than one device". Always name one, and
+# prefer the cable: it is the faster transport and the one just plugged in.
+dori_serial() {
+  [[ -n ${DORI_SERIAL:-} ]] && { echo "$DORI_SERIAL"; return 0; }
+  adb devices 2>/dev/null | awk '
+    NR > 1 && $2 == "device" {
+      if ($1 !~ /:/) { print $1; found = 1; exit }
+      if (!wireless) wireless = $1
+    }
+    END { if (!found && wireless) print wireless }'
+}
+
 notify() { command -v notify-send >/dev/null 2>&1 && notify-send "$@"; }
 
 # Find processes by their actual executable name, then filter on an argument
@@ -87,7 +100,7 @@ require_ready() {
     echo "dori-camera: $DEVICE is not a character device; run dori-setup" >&2
     exit 1
   fi
-  if [[ "$(adb get-state 2>/dev/null)" != "device" ]]; then
+  if [[ -z "$(dori_serial)" ]]; then
     notify -u critical "Dori" "No phone over adb. Connect USB and accept the debugging prompt."
     echo "dori-camera: no adb device in state 'device'" >&2
     exit 1
@@ -101,7 +114,7 @@ start_stream() {
     rotate=(--capture-orientation="$FRONT_ROTATION")
 
   require_ready
-  nohup scrcpy --video-source=camera --camera-id="$cam" \
+  nohup scrcpy -s "$(dori_serial)" --video-source=camera --camera-id="$cam" \
     --camera-ar=16:9 --max-size="$MAX_SIZE" --max-fps="$FPS" \
     "${rotate[@]}" \
     --v4l2-sink="$DEVICE" --no-audio --no-window \

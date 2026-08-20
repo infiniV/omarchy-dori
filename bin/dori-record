@@ -39,6 +39,19 @@ while (($# > 0)); do
 done
 ACTION="${ACTION:-toggle}"
 
+# With the cable in and Wi-Fi on at the same time, adb sees two devices and
+# every bare adb call fails with "more than one device". Always name one, and
+# prefer the cable: it is the faster transport and the one just plugged in.
+dori_serial() {
+  [[ -n ${DORI_SERIAL:-} ]] && { echo "$DORI_SERIAL"; return 0; }
+  adb devices 2>/dev/null | awk '
+    NR > 1 && $2 == "device" {
+      if ($1 !~ /:/) { print $1; found = 1; exit }
+      if (!wireless) wireless = $1
+    }
+    END { if (!found && wireless) print wireless }'
+}
+
 notify() { command -v notify-send >/dev/null 2>&1 && notify-send "$@"; }
 
 # Find processes by their actual executable name, then filter on an argument
@@ -82,14 +95,15 @@ case "$ACTION" in
       echo "dori-record: already recording $(current_file)" >&2
       exit 0
     fi
-    if [[ "$(adb get-state 2>/dev/null)" != "device" ]]; then
+    serial=$(dori_serial)
+    if [[ -z $serial ]]; then
       notify -u critical "Dori" "No phone over adb."
       echo "dori-record: no adb device in state 'device'" >&2
       exit 1
     fi
     mkdir -p "$DIR"
     out="$DIR/phone-$(date +%Y%m%d-%H%M%S).mp4"
-    nohup scrcpy --no-window --no-playback \
+    nohup scrcpy -s "$serial" --no-window --no-playback \
       --record="$out" \
       --video-codec="$CODEC" --video-bit-rate="$BITRATE" \
       >"$LOG" 2>&1 &

@@ -1,0 +1,206 @@
+#!/bin/bash
+# Relay the phone's notifications to this desktop.
+#
+#   dori-notify start | stop | toggle | status | once
+#
+#   --interval N   seconds between polls (default 4)
+#
+# There is no app to install on the phone and no account anywhere: adb already
+# has permission to read the notification dump, so this reads it, notices what
+# is new, and hands it to notify-send. Nothing is written down but a hash of
+# what has already been shown, and that lives in $XDG_RUNTIME_DIR — the
+# notification text itself is never stored.
+#
+# Ongoing notifications (music players, downloads, "app is running") are
+# skipped: they re-post constantly and would never stop arriving.
+
+set -uo pipefail
+
+INTERVAL=4
+RUNDIR="${XDG_RUNTIME_DIR:-/tmp}/dori"
+mkdir -p "$RUNDIR"
+SEEN="$RUNDIR/notify-seen"
+ACTION=""
+
+while (($# > 0)); do
+  case "$1" in
+    --interval) INTERVAL="${2:-4}"; shift 2 ;;
+    -h | --help)
+      sed -n '2,17p' "$0"
+      exit 0
+      ;;
+    -*)
+      echo "dori-notify: unknown flag $1" >&2
+      exit 1
+      ;;
+    *) ACTION="$1"; shift ;;
+  esac
+done
+ACTION="${ACTION:-status}"
+
+# The daemon is this same script, re-executed with a marker argument. `pgrep -x`
+# matches a shebang script by its own filename, so the marker is enough to find
+# it again — no pid file, nothing in a shared directory to trust.
+MARKER="__relay"
+SELF="$(realpath "$0")"
+
+# With the cable in and Wi-Fi on at the same time, adb sees two devices and
+# every bare adb call fails with "more than one device". Always name one, and
+# prefer the cable: it is the faster transport and the one just plugged in.
+dori_serial() {
+  [[ -n ${DORI_SERIAL:-} ]] && { echo "$DORI_SERIAL"; return 0; }
+  adb devices 2>/dev/null | awk '
+    NR > 1 && $2 == "device" {
+      if ($1 !~ /:/) { print $1; found = 1; exit }
+      if (!wireless) wireless = $1
+    }
+    END { if (!found && wireless) print wireless }'
+}
+
+proc_pids() {
+  pgrep -a -x "$(basename "$SELF")" 2>/dev/null | awk -v m="$MARKER" 'index($0, m) { print $1 }'
+}
+
+# A package name is not a name. Translate the ones people actually have, and
+# fall back to the last readable segment for everything else.
+app_name() {
+  case "$1" in
+    com.whatsapp*) echo "WhatsApp" ;;
+    com.google.android.gm) echo "Gmail" ;;
+    com.google.android.apps.messaging) echo "Messages" ;;
+    com.google.android.apps.dynamite) echo "Google Chat" ;;
+    com.google.android.youtube) echo "YouTube" ;;
+    org.telegram.messenger*) echo "Telegram" ;;
+    com.instagram.android) echo "Instagram" ;;
+    com.facebook.orca) echo "Messenger" ;;
+    com.facebook.katana) echo "Facebook" ;;
+    com.twitter.android | com.x.android) echo "X" ;;
+    com.linkedin.android) echo "LinkedIn" ;;
+    com.slack) echo "Slack" ;;
+    com.discord) echo "Discord" ;;
+    com.spotify.music) echo "Spotify" ;;
+    com.microsoft.teams*) echo "Teams" ;;
+    com.samsung.android.messaging) echo "Messages" ;;
+    com.android.dialer | com.samsung.android.dialer) echo "Phone" ;;
+    com.google.android.calendar) echo "Calendar" ;;
+    *)
+      local last="${1##*.}"
+      printf '%s' "$(tr '[:lower:]' '[:upper:]' <<<"${last:0:1}")${last:1}"
+      ;;
+  esac
+}
+
+# One line per notification: pkg <tab> title <tab> text.
+#
+# Ongoing ones (FLAG_ONGOING, 0x2) are dropped here. Group summaries are left
+# in: they usually carry the readable version of the thing, and an identical
+# child is collapsed later by the content hash.
+read_notifications() {
+  local serial
+  serial=$(dori_serial)
+  [[ -z $serial ]] && return 0
+  adb -s "$serial" shell dumpsys notification --noredact 2>/dev/null | awk '
+    function value(line,   open) {
+      open = index(line, "(")
+      if (!open) return ""
+      line = substr(line, open + 1)
+      sub(/\)[[:space:]]*$/, "", line)
+      return line
+    }
+    function emit() {
+      if (pkg != "" && (title != "" || text != "") && !ongoing)
+        printf "%s\t%s\t%s\n", pkg, title, text
+      pkg = ""; title = ""; text = ""; ongoing = 0
+    }
+    /^ *NotificationRecord\(/ {
+      emit()
+      if (match($0, /pkg=[^ ]+/)) pkg = substr($0, RSTART + 4, RLENGTH - 4)
+      next
+    }
+    /^ *flags=0x/ {
+      if (pkg != "" && !flagseen) {
+        flags = strtonum(substr($0, index($0, "0x")))
+        if (and(flags, 2)) ongoing = 1
+        flagseen = 1
+      }
+      next
+    }
+    /^ *android\.title=/ { if (title == "") title = value($0); next }
+    /^ *android\.text=/  { if (text  == "") text  = value($0); next }
+    /^ *NotificationRecord/ { next }
+    { if ($0 ~ /^ *uid=/) flagseen = 0 }
+    END { emit() }
+  '
+}
+
+show_new() { # $1: 1 to notify, 0 to prime silently
+  local notify=$1 pkg title text hash fresh
+  local -A shown=()
+  fresh=$(mktemp "$RUNDIR/notify-seen.XXXXXX")
+  while IFS=$'\t' read -r pkg title text; do
+    [[ -z $pkg ]] && continue
+    hash=$(printf '%s\037%s\037%s' "$pkg" "$title" "$text" | cksum | cut -d' ' -f1)
+    echo "$hash" >>"$fresh"
+    # A grouped notification appears twice in one dump, as the summary and as
+    # its child. Same text, same hash, one desktop notification.
+    [[ -n ${shown[$hash]:-} ]] && continue
+    shown[$hash]=1
+    if ((notify)) && ! grep -qxF "$hash" "$SEEN" 2>/dev/null; then
+      notify-send -a "$(app_name "$pkg")" -- "${title:-$(app_name "$pkg")}" "$text"
+    fi
+  done < <(read_notifications)
+
+  # Keep the hashes of what is still on the phone, so a notification that is
+  # dismissed and later re-posted is announced again.
+  mv "$fresh" "$SEEN"
+}
+
+case "$ACTION" in
+  status)
+    pids=$(proc_pids)
+    jq -n --argjson running "$([[ -n $pids ]] && echo true || echo false)" '{relaying: $running}'
+    ;;
+
+  once) show_new 1 ;;
+
+  stop)
+    pids=$(proc_pids)
+    [[ -n $pids ]] && kill $pids 2>/dev/null
+    command -v notify-send >/dev/null 2>&1 && notify-send "Dori" "Notification relay off"
+    exit 0
+    ;;
+
+  start)
+    if [[ -n "$(proc_pids)" ]]; then
+      echo "dori-notify: already relaying" >&2
+      exit 0
+    fi
+    # Prime quietly, so turning the relay on does not replay everything that is
+    # already sitting in the phone's shade.
+    show_new 0
+    nohup "$SELF" "$MARKER" --interval "$INTERVAL" >>"$RUNDIR/notify.log" 2>&1 &
+    disown
+    sleep 0.4
+    if [[ -z "$(proc_pids)" ]]; then
+      echo "dori-notify: the relay did not start; see $RUNDIR/notify.log" >&2
+      exit 1
+    fi
+    command -v notify-send >/dev/null 2>&1 && notify-send "Dori" "Relaying phone notifications"
+    ;;
+
+  toggle)
+    if [[ -n "$(proc_pids)" ]]; then exec "$SELF" stop; else exec "$SELF" start --interval "$INTERVAL"; fi
+    ;;
+
+  "$MARKER")
+    while true; do
+      [[ -n "$(dori_serial)" ]] && show_new 1
+      sleep "$INTERVAL"
+    done
+    ;;
+
+  *)
+    echo "Usage: dori-notify <start|stop|toggle|status|once> [--interval N]" >&2
+    exit 1
+    ;;
+esac

@@ -110,6 +110,10 @@ fi
 mirroring=false
 [[ -n "$(proc_pids scrcpy "--window-title=$TITLE")" ]] && mirroring=true
 
+# The notification relay is this project's own daemon, found the same way.
+relaying=false
+[[ -n "$(proc_pids dori-notify "__relay")" ]] && relaying=true
+
 recording_file=$(proc_args scrcpy "--record=" | grep -oP -- '--record=\K\S+' | head -1)
 
 jq -n \
@@ -123,6 +127,7 @@ jq -n \
   --arg card "$card" \
   --arg recording "${recording_file:-}" \
   --argjson battery "$battery_json" \
+  --argjson relaying "$relaying" \
   --argjson loopback "$loopback" \
   --argjson mirroring "$mirroring" \
   '{
@@ -138,6 +143,7 @@ jq -n \
     card: (if $card == "" then null else $card end),
     loopback: $loopback,
     mirroring: $mirroring,
+    relaying: $relaying,
     recording: ($recording != ""),
     recordingFile: (if $recording == "" then null else $recording end)
   }'

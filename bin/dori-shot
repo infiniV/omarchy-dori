@@ -25,9 +25,23 @@ while (($# > 0)); do
   esac
 done
 
+# With the cable in and Wi-Fi on at the same time, adb sees two devices and
+# every bare adb call fails with "more than one device". Always name one, and
+# prefer the cable: it is the faster transport and the one just plugged in.
+dori_serial() {
+  [[ -n ${DORI_SERIAL:-} ]] && { echo "$DORI_SERIAL"; return 0; }
+  adb devices 2>/dev/null | awk '
+    NR > 1 && $2 == "device" {
+      if ($1 !~ /:/) { print $1; found = 1; exit }
+      if (!wireless) wireless = $1
+    }
+    END { if (!found && wireless) print wireless }'
+}
+
 notify() { command -v notify-send >/dev/null 2>&1 && notify-send "$@"; }
 
-if [[ "$(adb get-state 2>/dev/null)" != "device" ]]; then
+SERIAL=$(dori_serial)
+if [[ -z $SERIAL ]]; then
   notify -u critical "Dori" "No phone over adb."
   echo "dori-shot: no adb device in state 'device'" >&2
   exit 1
@@ -38,7 +52,7 @@ out="$DIR/phone-$(date +%Y%m%d-%H%M%S).png"
 
 # exec-out keeps the PNG bytes intact; `adb shell screencap` mangles them on
 # some devices by translating line endings.
-if ! adb exec-out screencap -p >"$out" 2>/dev/null || [[ ! -s $out ]]; then
+if ! adb -s "$SERIAL" exec-out screencap -p >"$out" 2>/dev/null || [[ ! -s $out ]]; then
   rm -f "$out"
   notify -u critical "Dori" "The screenshot failed."
   echo "dori-shot: screencap produced nothing" >&2

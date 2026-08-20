@@ -29,6 +29,7 @@ Panel {
   readonly property string card: String(status.card || "")
   readonly property string android: String(status.android || "")
   readonly property bool wireless: String(status.transport || "") === "wireless"
+  readonly property bool relaying: status.relaying === true
 
   // Battery is only in the blob while the panel is open — it costs an adb round
   // trip, and the bar icon has nowhere to show it anyway.
@@ -53,10 +54,25 @@ Panel {
   readonly property int backCameraId: Number(setting("backCameraId", 0))
   readonly property int frontCameraId: Number(setting("frontCameraId", 1))
   readonly property string frontRotation: String(setting("frontRotation", "0"))
+  readonly property bool livePreview: setting("livePreview", true) === true
   readonly property string codec: setting("codec", "h264")
   readonly property int bitrate: Number(setting("bitrateMbps", 20))
   readonly property int maxFps: Number(setting("maxFps", 60))
   readonly property bool screenOff: setting("screenOff", false) === true
+
+  // The live preview: a still frame of the phone's screen, refreshed while the
+  // panel is open. Each grab writes to the other of two files so the image
+  // loader is always handed a URL it has not cached.
+  property string frameSlot: "a"
+  property string framePath: ""
+  // Which of the two image buffers is on screen. A frame is loaded into the
+  // hidden one and only revealed once it is ready, so the preview never blinks
+  // back to the placeholder between frames.
+  property bool showA: true
+  property real frameAspect: 0.46
+  // Not while the mirror is up: the real window is right there, and polling the
+  // phone for stills behind it would be work nobody asked for.
+  readonly property bool previewVisible: livePreview && ready && !mirroring
 
   // The helper scripts ship inside the plugin folder, so the plugin works as
   // soon as it is cloned — nothing to copy onto PATH, nothing to keep in sync.
@@ -136,6 +152,13 @@ Panel {
     return args
   }
 
+  function grabFrame() {
+    if (frameProc.running || !ready || !livePreview || mirroring) return
+    frameSlot = frameSlot === "a" ? "b" : "a"
+    frameProc.command = [bin("dori-frame"), "--slot", frameSlot, "--width", "260"]
+    frameProc.running = true
+  }
+
   function screenshot() {
     if (ready) runAction([bin("dori-shot")])
   }
@@ -151,6 +174,10 @@ Panel {
   // network connection we already have.
   function toggleWireless() {
     runAction([bin("dori-wireless"), wireless ? "off" : "on"])
+  }
+
+  function toggleRelay() {
+    runAction([bin("dori-notify"), "toggle"])
   }
 
   function updateSetting(key, value) {
@@ -186,6 +213,32 @@ Panel {
         }
       }
     }
+  }
+
+  // A frame that fails — phone mid-unlock, screen rotating — leaves the last
+  // good one on screen rather than blanking the preview.
+  Process {
+    id: frameProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var path = String(text || "").trim()
+        if (path === "") return
+        root.framePath = "file://" + path
+        if (root.showA) frameB.source = root.framePath
+        else frameA.source = root.framePath
+      }
+    }
+  }
+
+  // One frame every two and a half seconds, only while the panel is open. A
+  // grab costs about a second of adb, so this is a slideshow on purpose.
+  Timer {
+    interval: 2500
+    running: root.opened && root.previewVisible
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: root.grabFrame()
   }
 
   Process {
@@ -237,7 +290,7 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(360))
+    contentWidth: panel.fittedContentWidth(Style.space(360) + body.previewSpace)
     contentHeight: panel.fittedContentHeight(column.implicitHeight)
 
     PanelKeyCatcher {
@@ -246,11 +299,81 @@ Panel {
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
 
-      Column {
-        id: column
+      Row {
+        id: body
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top
+        spacing: Style.space(14)
+
+        // The preview is as tall as the controls beside it and as wide as that
+        // height allows at the phone's own aspect ratio, so it reads as a phone
+        // rather than as a picture of one.
+        readonly property real previewWidth:
+          Math.max(Style.space(140),
+                   Math.min(Style.space(300),
+                            Math.round(column.implicitHeight * root.frameAspect)))
+        readonly property real previewSpace:
+          root.previewVisible ? previewWidth + spacing : 0
+
+        Rectangle {
+          id: previewPane
+          visible: root.previewVisible
+          width: root.previewVisible ? body.previewWidth : 0
+          height: column.implicitHeight
+          radius: Style.cornerRadius
+          color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.04)
+          border.width: 1
+          border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.18)
+          clip: true
+
+          Image {
+            id: frameA
+            anchors.fill: parent
+            anchors.margins: Style.space(4)
+            fillMode: Image.PreserveAspectFit
+            cache: false
+            asynchronous: true
+            smooth: true
+            opacity: root.showA ? 1 : 0
+            onStatusChanged: if (status === Image.Ready) {
+              root.frameAspect = implicitWidth / implicitHeight
+              root.showA = true
+            }
+            Behavior on opacity { NumberAnimation { duration: 160 } }
+          }
+
+          Image {
+            id: frameB
+            anchors.fill: parent
+            anchors.margins: Style.space(4)
+            fillMode: Image.PreserveAspectFit
+            cache: false
+            asynchronous: true
+            smooth: true
+            opacity: root.showA ? 0 : 1
+            onStatusChanged: if (status === Image.Ready) {
+              root.frameAspect = implicitWidth / implicitHeight
+              root.showA = false
+            }
+            Behavior on opacity { NumberAnimation { duration: 160 } }
+          }
+
+          // Only until the first frame lands. After that the last good frame
+          // stays up, which is more honest than a blinking icon.
+          Text {
+            anchors.centerIn: parent
+            visible: frameA.status !== Image.Ready && frameB.status !== Image.Ready
+            text: root.phoneGlyph
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.display
+          }
+        }
+
+      Column {
+        id: column
+        width: parent.width - body.previewSpace
         spacing: Style.space(14)
 
         // ------------------------------------------------------- hero
@@ -633,7 +756,24 @@ Panel {
             fontFamily: root.fontFamily
             onClicked: root.toggleWireless()
           }
+
+          // The phone's notifications, read straight off adb and handed to the
+          // desktop. No app on the phone, no account in the middle.
+          Toggle {
+            width: parent.width
+            label: "Relay notifications"
+            description: root.relaying
+              ? "The phone's notifications arrive here"
+              : "Show the phone's notifications on this desktop"
+            checked: root.relaying
+            enabled: root.ready || root.relaying
+            opacity: enabled ? 1 : 0.4
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            onClicked: root.toggleRelay()
+          }
         }
+      }
       }
     }
   }

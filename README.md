@@ -6,6 +6,9 @@ you charge with.
 
 ![Dori: the phone's screen mirrored on the desktop, next to the Dori panel](preview.png)
 
+- **Live preview** — a still of the phone's screen beside the controls,
+  refreshed about every two and a half seconds while the panel is open, and not
+  at all when it is closed or when the full mirror is up.
 - **Camera** — the phone's back or front camera appears as an ordinary webcam at
   `/dev/video10`, so Meet, Zoom, Discord, OBS and anything else that opens a
   `/dev/video*` node can use it without knowing where the picture comes from.
@@ -15,6 +18,8 @@ you charge with.
   `~/Pictures/dori`, because the reason you took it is usually to paste it.
 - **Record** — the phone's screen to an mp4 in the background, with no mirror
   window in the way, while you keep using the phone.
+- **Notifications** — the phone's notifications, on this desktop. No app to
+  install on the phone, no account in the middle: adb can already read them.
 - **No cable** — switch the connection to Wi-Fi and unplug. Everything above
   keeps working.
 - **It tells you what is wrong.** A phone that is plugged in but not authorised
@@ -64,7 +69,13 @@ live.
 | Left click the icon | open the panel |
 | Right click | cycle the camera: off → back → front → off |
 | Middle click | start or focus the screen mirror |
-| Panel | all of it, plus screenshot, recording, codec, bitrate, and Wi-Fi |
+| Panel | all of it, plus screenshot, recording, notifications, codec, bitrate, and Wi-Fi |
+
+**Notifications.** Turn on *Relay notifications* and what appears on the phone
+appears here. Ongoing notifications — music players, downloads, "app is
+running" — are skipped, because they re-post forever. Nothing is written down
+but a hash of what has already been shown, in `$XDG_RUNTIME_DIR`; the
+notification text itself is never stored.
 
 **Working without the cable.** Plug the phone in, open the panel, and turn on
 *Work without the cable*. Dori switches the phone's adb to Wi-Fi and reconnects
@@ -82,6 +93,7 @@ Omarchy renders these from the manifest, under the plugin's own settings.
 
 | Setting | Default | What it is for |
 |---|---|---|
+| Live preview | on | the still of the phone's screen in the panel |
 | Webcam device | `/dev/video10` | must match the `video_nr` the module was loaded with |
 | Back / front camera id | `0` / `1` | run `scrcpy --list-cameras` if the two buttons are swapped |
 | Front camera rotation | `0` | some phones deliver the front sensor upside down; set `180` |
@@ -101,6 +113,8 @@ bin/dori-status [--full]        # one JSON blob: device, battery, camera, mirror
 bin/dori-camera back|front|off|cycle
 bin/dori-mirror start|toggle|focus|stop|restart [--codec h265] [--bitrate 30M]
 bin/dori-shot                   # screenshot to ~/Pictures/dori and the clipboard
+bin/dori-frame --slot a         # one low-res frame, for the panel's preview
+bin/dori-notify start|stop|toggle|status|once
 bin/dori-record start|stop|toggle|status
 bin/dori-wireless on|off|status
 bin/dori-setup [--uninstall]
@@ -121,6 +135,7 @@ shared `/tmp` path.
 | Mirror opens then dies | see `$XDG_RUNTIME_DIR/dori/mirror.log` |
 | "Work without the cable" is greyed out | it needs the phone on the cable once, to switch it over |
 | Wi-Fi connects, then drops later | phones reset adb over TCP on reboot and on some Wi-Fi changes; plug in and switch again |
+| Everything fails with "more than one device" | it should not — every script names one device, preferring the cable. Set `DORI_SERIAL` if you have two phones and want the other one |
 | A recording will not play | it was killed rather than stopped; use the panel or `dori-record stop`, which lets scrcpy finalise the file |
 
 ## What it runs on your machine
@@ -138,6 +153,9 @@ Dori is a QML panel plus a handful of bash scripts. It starts `scrcpy`, reads
 - `dori-wireless` is the only part that puts anything on the network: it is
   Android's own adb-over-TCP, off by default, switched on by you, and closed
   again by the same toggle.
+- The preview frames and the notification hashes live in `$XDG_RUNTIME_DIR`:
+  your user only, in memory, gone at logout. Screenshots and recordings go where
+  you would expect, under `~/Pictures` and `~/Videos`.
 
 ## Uninstall
 
