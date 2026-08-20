@@ -18,10 +18,6 @@ you charge with.
   `~/Pictures/dori`, because the reason you took it is usually to paste it.
 - **Record** — the phone's screen to an mp4 in the background, with no mirror
   window in the way, while you keep using the phone.
-- **A fourth screen** — the phone as an extra monitor, to the right of the
-  others. Dori adds a headless Hyprland output at the phone's own resolution and
-  serves it over VNC on a private address; scan the QR in the panel with any VNC
-  app and drag a window onto it.
 - **Notifications** — the phone's notifications, on this desktop. No app to
   install on the phone, no account in the middle: adb can already read them.
 - **No cable** — switch the connection to Wi-Fi and unplug. Everything above
@@ -41,7 +37,6 @@ in the way.
 | Phone | Android 12 or newer for the camera; any adb-capable Android for the mirror |
 | Packages | `scrcpy`, `android-tools`, `v4l-utils`, `v4l2loopback-dkms` |
 | Optional | `wl-clipboard`, so a screenshot lands on the clipboard as well as on disk |
-| Optional | `wayvnc` and `qrencode`, for the second screen, plus a VNC app on the phone |
 | On the phone | USB debugging enabled in Developer options |
 
 `bin/dori-setup` installs the packages for you on Arch and Omarchy.
@@ -76,31 +71,6 @@ live.
 | Middle click | start or focus the screen mirror |
 | Panel | all of it, plus screenshot, recording, notifications, codec, bitrate, and Wi-Fi |
 
-**The fourth screen.** Turn on *Use the phone as a display*, scan the QR with a
-VNC app (AVNC and bVNC both work), and Hyprland has one more monitor. The screen
-is served on the Tailscale address when Tailscale is up and on the LAN address
-otherwise — never on `0.0.0.0`. wayvnc runs without a password, so anyone
-already on that network can connect: leave it off on networks you do not trust.
-Turning it off stops wayvnc and removes the output, and Hyprland moves the
-workspaces back on its own.
-
-**What Wi-Fi costs.** Android throttles the Wi-Fi radio while the phone's screen
-is off, and adb rides that radio, so everything slows down — a screen grab that
-takes a second on the cable can take thirty. Dori works around it rather than
-pretending it is not there:
-
-- the mirror drops to 8 Mbps, 30 fps and 1200 px over Wi-Fi, which is the
-  difference between a delayed video call and a usable screen (`--wifi-profile
-  off` keeps your settings)
-- the live preview asks the phone whether its screen is even on, and says
-  *Screen off* instead of spending thirty seconds fetching a black rectangle
-- scrcpy occasionally fails to push its server over a flaky link; the mirror and
-  the recorder each retry once before complaining
-- long transfers are bounded, so a bad moment on the network never leaves a
-  stuck process behind
-
-Wake the phone and Wi-Fi picks straight back up.
-
 **Notifications.** Turn on *Relay notifications* and what appears on the phone
 appears here. Ongoing notifications — music players, downloads, "app is
 running" — are skipped, because they re-post forever. Nothing is written down
@@ -127,6 +97,7 @@ Omarchy renders these from the manifest, under the plugin's own settings.
 | Webcam device | `/dev/video10` | must match the `video_nr` the module was loaded with |
 | Back / front camera id | `0` / `1` | run `scrcpy --list-cameras` if the two buttons are swapped |
 | Front camera rotation | `0` | some phones deliver the front sensor upside down; set `180` |
+| Typing into the mirror | `sdk` | `uhid` acts like a real keyboard: it needs a layout set on the phone first, and on some Samsungs it leaves the phone's own keyboard wedged |
 | Mirror codec | `h264` | `h265` is smaller at the same quality and needs a phone that encodes it |
 | Mirror bitrate | `20 Mbps` | 4 is unwatchable, 60 saturates USB 2 |
 | Mirror frame rate | `60` | |
@@ -145,7 +116,6 @@ bin/dori-mirror start|toggle|focus|stop|restart [--codec h265] [--bitrate 30M]
 bin/dori-shot                   # screenshot to ~/Pictures/dori and the clipboard
 bin/dori-frame --slot a         # one low-res frame, for the panel's preview
 bin/dori-notify start|stop|toggle|status|once
-bin/dori-display on|off|toggle|status   # the phone as a fourth screen
 bin/dori-record start|stop|toggle|status
 bin/dori-wireless on|off|status
 bin/dori-setup [--uninstall]
@@ -168,8 +138,9 @@ shared `/tmp` path.
 | Wi-Fi connects, then drops later | phones reset adb over TCP on reboot and on some Wi-Fi changes; plug in and switch again |
 | Everything is slow over Wi-Fi | the phone's screen is off; wake it. Android throttles the radio while it sleeps |
 | The mirror opens but lags over Wi-Fi | it is already on the lighter profile; drop the bitrate further, or plug the cable back in |
-| The display toggle is greyed out | `wayvnc` is missing, or installed and broken — an AUR build left behind by a library upgrade fails at exec time. `sudo pacman -S extra/wayvnc` |
 | Everything fails with "more than one device" | it should not — every script names one device, preferring the cable. Set `DORI_SERIAL` if you have two phones and want the other one |
+| The phone's own on-screen keyboard stops typing | a `uhid` session can leave Samsung's keyboard wedged. `adb shell am force-stop com.samsung.android.honeyboard`, or restart the phone. Staying on `sdk` avoids it |
+| Typing into the mirror does nothing | you are on `uhid`; either switch the setting back to `sdk`, or set a layout on the phone under Settings > System > Languages and input > Physical keyboard |
 | A recording will not play | it was killed rather than stopped; use the panel or `dori-record stop`, which lets scrcpy finalise the file |
 
 ## What it runs on your machine

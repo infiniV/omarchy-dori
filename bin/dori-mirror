@@ -11,6 +11,7 @@
 #   --screen-off        blank the phone's own display while mirroring
 #   --no-screen-off     leave it on (default)
 #   --no-audio          do not forward phone audio
+#   --keyboard MODE     sdk (default), uhid, or disabled
 #   --wifi-profile off  keep the given settings over Wi-Fi too
 #
 # The flags win over the PM_* environment variables, so the Dori panel can
@@ -29,6 +30,11 @@ FPS="${PM_FPS:-60}"
 MAXSIZE="${PM_MAXSIZE:-fit}"
 SCREEN_OFF="${PM_SCREEN_OFF:-}"
 AUDIO=1
+# scrcpy defaults to uhid, which pretends to be a physical keyboard — and a
+# physical keyboard types nothing until a layout is configured on the phone,
+# under Settings > System > Languages and input > Physical keyboard. Most people
+# have never been there, so the keys just do nothing. "sdk" needs no setup.
+KEYBOARD="sdk"
 WIFI_PROFILE=1
 ACTION=""
 
@@ -41,6 +47,7 @@ while (($# > 0)); do
     --screen-off) SCREEN_OFF=1; shift ;;
     --no-screen-off) SCREEN_OFF=""; shift ;;
     --no-audio) AUDIO=0; shift ;;
+    --keyboard) KEYBOARD="${2:-sdk}"; shift 2 ;;
     --wifi-profile)
       [[ ${2:-auto} == "off" ]] && WIFI_PROFILE=0
       shift 2
@@ -194,9 +201,8 @@ start_mirror() {
       --max-fps="$FPS" \
       --max-size="$maxsize" \
       "${audio[@]}" \
-      --keyboard=uhid \
+      --keyboard="$KEYBOARD" \
       --stay-awake \
-      --power-off-on-close \
       "${scroff[@]}" \
       >"$LOG" 2>&1 &
     disown

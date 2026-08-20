@@ -118,15 +118,6 @@ fi
 mirroring=false
 [[ -n "$(proc_pids scrcpy "--window-title=$TITLE")" ]] && mirroring=true
 
-# The second screen owns its own state; ask the script that manages it rather
-# than working it out twice. Only with --full: it costs a couple of process
-# spawns, and the bar icon has no use for it.
-screen_json="null"
-if ((FULL)); then
-  screen_json=$("$(dirname "$(realpath "$0")")/dori-display" status 2>/dev/null || echo null)
-  [[ -z $screen_json ]] && screen_json="null"
-fi
-
 # The notification relay is this project's own daemon, found the same way.
 relaying=false
 [[ -n "$(proc_pids dori-notify "__relay")" ]] && relaying=true
@@ -144,7 +135,6 @@ jq -n \
   --arg card "$card" \
   --arg recording "${recording_file:-}" \
   --argjson battery "$battery_json" \
-  --argjson screen "$screen_json" \
   --argjson relaying "$relaying" \
   --argjson loopback "$loopback" \
   --argjson mirroring "$mirroring" \
@@ -161,7 +151,6 @@ jq -n \
     card: (if $card == "" then null else $card end),
     loopback: $loopback,
     mirroring: $mirroring,
-    screen: $screen,
     relaying: $relaying,
     recording: ($recording != ""),
     recordingFile: (if $recording == "" then null else $recording end)
