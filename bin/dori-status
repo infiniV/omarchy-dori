@@ -35,6 +35,11 @@ while (($# > 0)); do
   esac
 done
 
+# Every panel instance runs this at startup, so on a multi-monitor login two of
+# them reach adb at the same instant. Bring the server up under a lock first or
+# they both fork one and the loser aborts.
+dori_adb_ready
+
 # The first device adb lists, including the unusable ones: "unauthorized" is the
 # single most common reason nothing works, and it deserves to be said out loud
 # rather than looking like "absent". A cabled phone wins over a wireless one,
