@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or general discussion
+    url: https://github.com/infiniV/omarchy-dori/discussions
+    about: Ask here if something is unclear rather than broken.
