@@ -14,8 +14,10 @@ commit messages, and anywhere else this project is being discussed.
 
 ## Enforcement
 
-Report anything that crosses the line to the maintainer at
-<rushamelahi26@gmail.com>. Reports stay private.
+Report anything that crosses the line to the maintainer privately, using
+GitHub's [report abuse](https://github.com/contact/report-abuse) form. If it
+concerns a security issue rather than conduct, see [SECURITY.md](SECURITY.md)
+instead.
 
 The maintainer will do whatever is needed and proportionate: edit or delete the
 content, explain why, and where it keeps happening, block the account from the
