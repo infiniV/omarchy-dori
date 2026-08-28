@@ -1,0 +1,51 @@
+# CodeRabbit configuration. Free for public repositories.
+# Reference: https://docs.coderabbit.ai/guides/configure-coderabbit
+language: en-US
+early_access: false
+
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  high_level_summary_placeholder: "@coderabbitai summary"
+  poem: false
+  review_status: true
+  collapse_walkthrough: true
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - master
+  path_filters:
+    - "!preview.png"
+  path_instructions:
+    - path: "bin/**"
+      instructions: >-
+        These are bash scripts run on a user's desktop against an attached
+        Android phone over adb. Flag: unquoted expansions, missing `set -euo
+        pipefail`, command injection through device output or user settings,
+        world-writable or predictable paths under /tmp, and any process kill
+        that could match a process Dori did not start. Every long-running
+        process is expected to be a named systemd user unit, not a bare
+        background job.
+    - path: "Panel.qml"
+      instructions: >-
+        Quickshell/QML bar widget. Flag: work done on the UI thread, timers
+        that keep polling while the panel is closed, and shell arguments built
+        by string concatenation instead of an argument list.
+    - path: "manifest.json"
+      instructions: >-
+        Omarchy plugin manifest. Settings keys declared here must match the
+        keys the scripts and Panel.qml actually read.
+  tools:
+    shellcheck:
+      enabled: true
+    markdownlint:
+      enabled: true
+    gitleaks:
+      enabled: true
+    actionlint:
+      enabled: true
+
+chat:
+  auto_reply: true

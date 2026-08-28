@@ -98,10 +98,18 @@ fi
 # Which camera the running scrcpy is sinking into the loopback node, if any.
 camera_id=$(dori_unit_description camera | grep -oP -- 'camera \K\d+' | head -1)
 
-# A loopback node that does not exist means v4l2loopback was never loaded.
+# A missing loopback node has two quite different causes, and the fix is not
+# the same for both: the module was never loaded, or it is loaded and someone
+# else owns it — another tool's modprobe.d set devices=0, or took this number
+# first. Report the module separately so the panel can say which it is.
 loopback=false
 [[ -c $DEVICE ]] && loopback=true
 
+module=false
+[[ -d /sys/module/v4l2loopback ]] && module=true
+
+# The card type names whoever owns the node — Dori's "Phone Camera", or the
+# other tool that got there first.
 card=""
 if [[ $loopback == true ]] && command -v v4l2-ctl >/dev/null 2>&1; then
   card=$(v4l2-ctl --device="$DEVICE" --info 2>/dev/null |
@@ -110,6 +118,11 @@ fi
 
 mirroring=false
 dori_unit_active mirror && mirroring=true
+
+# The viewfinder window, if one is open. Same ownership rule as everything
+# else: only the player Dori started, in Dori's own unit.
+viewing=false
+dori_unit_active view && viewing=true
 
 # The notification relay is this project's own daemon, found the same way.
 relaying=false
@@ -134,7 +147,9 @@ jq -n \
   --argjson battery "$battery_json" \
   --argjson relaying "$relaying" \
   --argjson loopback "$loopback" \
+  --argjson module "$module" \
   --argjson mirroring "$mirroring" \
+  --argjson viewing "$viewing" \
   '{
     state: $state,
     serial: (if $serial == "" then null else $serial end),
@@ -147,7 +162,9 @@ jq -n \
     device: $device,
     card: (if $card == "" then null else $card end),
     loopback: $loopback,
+    module: $module,
     mirroring: $mirroring,
+    viewing: $viewing,
     relaying: $relaying,
     recording: ($recording != ""),
     recordingFile: (if $recording == "" then null else $recording end)

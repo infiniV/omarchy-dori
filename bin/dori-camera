@@ -8,8 +8,8 @@
 #   --device DEV          loopback node to write into (default /dev/video10)
 #   --back-id N           camera id for "back"  (default 0)
 #   --front-id N          camera id for "front" (default 1)
-#   --front-rotation DEG  0|90|180|270, for phones that deliver the front
-#                         sensor upside down (default 0)
+#   --back-rotation DEG   0|90|180|270, clockwise, for a sensor that arrives
+#   --front-rotation DEG  rotated or upside down (default 0 for both)
 #   --max-size PX         longest edge, 0 for native (default 1920)
 #   --fps N               capture frame rate (default 30)
 #
@@ -24,6 +24,7 @@ set -uo pipefail
 DEVICE="${DORI_V4L2_DEVICE:-/dev/video10}"
 BACK_ID=0
 FRONT_ID=1
+BACK_ROTATION=0
 FRONT_ROTATION=0
 MAX_SIZE=1920
 FPS=30
@@ -37,6 +38,7 @@ while (($# > 0)); do
     --device) DEVICE="${2:-}"; shift 2 ;;
     --back-id) BACK_ID="${2:-0}"; shift 2 ;;
     --front-id) FRONT_ID="${2:-1}"; shift 2 ;;
+    --back-rotation) BACK_ROTATION="${2:-0}"; shift 2 ;;
     --front-rotation) FRONT_ROTATION="${2:-0}"; shift 2 ;;
     --max-size) MAX_SIZE="${2:-1920}"; shift 2 ;;
     --fps) FPS="${2:-30}"; shift 2 ;;
@@ -79,20 +81,61 @@ stop_stream() {
   dori_unit_stop camera
 }
 
+# The loopback node keeps whatever format it negotiated for as long as anybody
+# has it open — the viewfinder included. Leave one running across a restart and
+# scrcpy comes back at 720p into a node still advertising 1080p, so changing the
+# resolution appears to do nothing at all. Drop the viewfinder for the length of
+# the switch and bring it back once there is something to see again.
+VIEW_WAS_UP=0
+
+release_viewfinder() {
+  dori_unit_active view || return 0
+  VIEW_WAS_UP=1
+  dori_unit_stop view
+}
+
+restore_viewfinder() {
+  ((VIEW_WAS_UP)) || return 0
+  VIEW_WAS_UP=0
+  # Backgrounded: dori-view spends a couple of seconds making sure the player
+  # did not exit on the spot, and the camera switch should not wait for that.
+  # It reports its own failures, so nothing is swallowed by doing this.
+  "$(dirname "$(readlink -f "$0")")/dori-view" start --device "$DEVICE" \
+    >/dev/null 2>&1 &
+}
+
 # Whether the unit's scrcpy has the loopback node open. Read-only: the pid is
 # looked at, never signalled, so a recycled pid can at worst delay the answer.
+# The fds are resolved with readlink rather than scraped out of `ls -l`, which
+# would match a device name appearing anywhere in the listing and depends on
+# the listing's format to boot.
 sink_open() {
-  local pid
+  local pid fd
   pid=$(systemctl --user show "$(dori_unit camera)" -p MainPID --value 2>/dev/null)
   [[ $pid =~ ^[0-9]+$ && $pid -gt 0 ]] || return 1
-  ls -l /proc/"$pid"/fd 2>/dev/null | grep -qF -- " $DEVICE"
+  for fd in /proc/"$pid"/fd/*; do
+    [[ "$(readlink -- "$fd" 2>/dev/null)" == "$DEVICE" ]] && return 0
+  done
+  return 1
 }
 
 require_ready() {
   if [[ ! -c $DEVICE ]]; then
-    notify -u critical "Dori" \
-      "No webcam device at $DEVICE. Run dori-setup once to load v4l2loopback."
-    echo "dori-camera: $DEVICE is not a character device; run dori-setup" >&2
+    # "Run dori-setup" is only useful advice when the module is not up. When it
+    # is loaded and the node still does not exist, something else on this
+    # machine owns the module — it was loaded with devices=0, or without the
+    # video_nr this expects — and saying so saves a lot of digging.
+    if [[ -d /sys/module/v4l2loopback ]]; then
+      notify -u critical "Dori" \
+        "v4l2loopback is loaded but nothing created $DEVICE. Another tool may own the module; run dori-setup."
+      echo "dori-camera: v4l2loopback is loaded but $DEVICE does not exist;" >&2
+      echo "  another v4l2loopback user may own the module. Run dori-setup," >&2
+      echo "  which adds Dori's own node without disturbing theirs." >&2
+    else
+      notify -u critical "Dori" \
+        "No webcam device at $DEVICE. Run dori-setup once to set up v4l2loopback."
+      echo "dori-camera: $DEVICE is not a character device; run dori-setup" >&2
+    fi
     exit 1
   fi
   if [[ -z "$(dori_serial)" ]]; then
@@ -104,9 +147,15 @@ require_ready() {
 
 start_stream() {
   local cam=$1 label=$2
-  local rotate=()
-  [[ $label == "front" && $FRONT_ROTATION != "0" ]] &&
-    rotate=(--capture-orientation="$FRONT_ROTATION")
+  # Each sensor is mounted its own way round, so back and front carry their own
+  # rotation. scrcpy only reads this at launch, which is why changing it has to
+  # restart the stream rather than nudge a live one.
+  local rotate=() degrees=0
+  case "$label" in
+    back) degrees=$BACK_ROTATION ;;
+    front) degrees=$FRONT_ROTATION ;;
+  esac
+  [[ $degrees != "0" ]] && rotate=(--capture-orientation="$degrees")
 
   require_ready
   dori_require_user_systemd || exit 1
@@ -125,8 +174,8 @@ start_stream() {
   # until it exits so there is nothing to read there. The stream is up when
   # the unit's process has the sink open. Over Wi-Fi that takes several
   # seconds, so wait for it rather than guessing.
-  local i
-  for i in {1..24}; do
+  local _
+  for _ in {1..24}; do
     dori_unit_active camera || break
     sink_open && break
     sleep 0.4
@@ -145,15 +194,18 @@ start_stream() {
 switch_to() {
   local cam=$1 label=$2
   if [[ -n "$(current_cam)" ]]; then
+    release_viewfinder
     stop_stream
     sleep 0.3
   fi
   start_stream "$cam" "$label"
+  restore_viewfinder
 }
 
 case "$MODE" in
   off | stop)
     if [[ -n "$(current_cam)" ]]; then
+      dori_unit_stop view
       stop_stream
       notify "Dori" "Camera stream stopped"
     fi
@@ -165,6 +217,7 @@ case "$MODE" in
       "") start_stream "$BACK_ID" "back" ;;
       "$BACK_ID") switch_to "$FRONT_ID" "front" ;;
       *)
+        dori_unit_stop view
         stop_stream
         notify "Dori" "Camera stream stopped"
         ;;

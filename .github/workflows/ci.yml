@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Lint bin/
+        # --source-path is what makes the `# shellcheck source=dori-lib.sh`
+        # directives resolve: the scripts source it by a path built at runtime,
+        # so shellcheck has to be told which directory to look in.
+        run: shellcheck --shell=bash --external-sources --source-path=bin bin/dori-*
+
+  manifest:
+    name: manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: manifest.json is valid JSON
+        run: python3 -c "import json;json.load(open('manifest.json'))"
+      - name: Declared entry points exist
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+          m = json.load(open("manifest.json"))
+          missing = [p for p in m.get("entryPoints", {}).values() if not os.path.exists(p)]
+          if missing:
+              sys.exit("missing entry points: " + ", ".join(missing))
+          PY
