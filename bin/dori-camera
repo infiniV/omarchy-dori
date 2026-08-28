@@ -81,6 +81,29 @@ stop_stream() {
   dori_unit_stop camera
 }
 
+# The loopback node keeps whatever format it negotiated for as long as anybody
+# has it open — the viewfinder included. Leave one running across a restart and
+# scrcpy comes back at 720p into a node still advertising 1080p, so changing the
+# resolution appears to do nothing at all. Drop the viewfinder for the length of
+# the switch and bring it back once there is something to see again.
+VIEW_WAS_UP=0
+
+release_viewfinder() {
+  dori_unit_active view || return 0
+  VIEW_WAS_UP=1
+  dori_unit_stop view
+}
+
+restore_viewfinder() {
+  ((VIEW_WAS_UP)) || return 0
+  VIEW_WAS_UP=0
+  # Backgrounded: dori-view spends a couple of seconds making sure the player
+  # did not exit on the spot, and the camera switch should not wait for that.
+  # It reports its own failures, so nothing is swallowed by doing this.
+  "$(dirname "$(readlink -f "$0")")/dori-view" start --device "$DEVICE" \
+    >/dev/null 2>&1 &
+}
+
 # Whether the unit's scrcpy has the loopback node open. Read-only: the pid is
 # looked at, never signalled, so a recycled pid can at worst delay the answer.
 sink_open() {
@@ -165,15 +188,18 @@ start_stream() {
 switch_to() {
   local cam=$1 label=$2
   if [[ -n "$(current_cam)" ]]; then
+    release_viewfinder
     stop_stream
     sleep 0.3
   fi
   start_stream "$cam" "$label"
+  restore_viewfinder
 }
 
 case "$MODE" in
   off | stop)
     if [[ -n "$(current_cam)" ]]; then
+      dori_unit_stop view
       stop_stream
       notify "Dori" "Camera stream stopped"
     fi
@@ -185,6 +211,7 @@ case "$MODE" in
       "") start_stream "$BACK_ID" "back" ;;
       "$BACK_ID") switch_to "$FRONT_ID" "front" ;;
       *)
+        dori_unit_stop view
         stop_stream
         notify "Dori" "Camera stream stopped"
         ;;
