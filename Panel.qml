@@ -26,6 +26,10 @@ Panel {
   readonly property bool mirroring: status.mirroring === true
   readonly property bool recording: status.recording === true
   readonly property bool loopback: status.loopback !== false
+  // Whether v4l2loopback is resident, which is a different thing from Dori
+  // having a node. Told apart so the callout below can name the real problem.
+  readonly property bool moduleLoaded: status.module === true
+  readonly property bool viewing: status.viewing === true
   readonly property string card: String(status.card || "")
   readonly property string android: String(status.android || "")
   readonly property bool wireless: String(status.transport || "") === "wireless"
@@ -53,7 +57,21 @@ Panel {
   readonly property string videoDevice: String(setting("videoDevice", "/dev/video10"))
   readonly property int backCameraId: Number(setting("backCameraId", 0))
   readonly property int frontCameraId: Number(setting("frontCameraId", 1))
+  // Rotation is per sensor: a phone that hands over the back camera upside down
+  // usually hands over the front one the right way up, so one dial for both
+  // would only ever be right half the time.
+  readonly property string backRotation: String(setting("backRotation", "0"))
   readonly property string frontRotation: String(setting("frontRotation", "0"))
+  // Which camera the panel's rotation control edits: the live one, or the back
+  // one when nothing is streaming, since that is what starting up picks first.
+  readonly property string rotationTarget: camera === "front" ? "front" : "back"
+  readonly property string rotation: rotationTarget === "front" ? frontRotation : backRotation
+  // Longest edge of the captured picture, and the capture rate. Both cost the
+  // phone battery and heat, which is the whole reason they are adjustable: a
+  // phone that throttles halfway through a call was streaming more than the
+  // call was ever going to show.
+  readonly property int cameraMaxSize: Number(setting("cameraMaxSize", 1920))
+  readonly property int cameraFps: Number(setting("cameraFps", 30))
   readonly property bool livePreview: setting("livePreview", true) === true
   readonly property string codec: setting("codec", "h264")
   readonly property int bitrate: Number(setting("bitrateMbps", 20))
@@ -96,7 +114,14 @@ Panel {
     if (deviceState === "unauthorized") return "Accept the USB debugging prompt on the phone"
     if (deviceState === "offline") return "Phone is offline — replug the cable"
     if (!ready) return "Phone is " + deviceState
-    if (!loopback) return "No webcam device at " + videoDevice + " — run bin/dori-setup once"
+    // These two look identical from the bar and have different fixes. The
+    // second one is what happens when another v4l2loopback consumer — OBS,
+    // Droidcam, camera-effects — already had the module up, so the load that
+    // would have made this node never happened.
+    if (!loopback) return moduleLoaded
+      ? "v4l2loopback is loaded but nothing created " + videoDevice
+        + " — another tool may own the module. Run bin/dori-setup"
+      : "No webcam device at " + videoDevice + " — run bin/dori-setup once"
     return ""
   }
 
@@ -134,13 +159,50 @@ Panel {
     actionProc.running = true
   }
 
-  function setCamera(target) {
+  // `overrides` carries values for the same reason `screenOff` is an override
+  // below: a restart triggered by one of the capture controls has to use the
+  // value it just wrote, not a binding that may not have settled yet.
+  function setCamera(target, overrides) {
     if (!ready && target !== "off") return
+    function pick(key, fallback) {
+      return overrides && overrides[key] !== undefined ? overrides[key] : fallback
+    }
     runAction([bin("dori-camera"), target,
                "--device", videoDevice,
                "--back-id", String(backCameraId),
                "--front-id", String(frontCameraId),
-               "--front-rotation", frontRotation])
+               "--back-rotation", String(pick("back", backRotation)),
+               "--front-rotation", String(pick("front", frontRotation)),
+               "--max-size", String(pick("maxSize", cameraMaxSize)),
+               "--fps", String(pick("fps", cameraFps))])
+  }
+
+  // scrcpy reads the orientation, the size and the frame rate once, when it
+  // launches. Saving any of them against a running stream would change nothing
+  // until the camera was next switched — a control that moves and does nothing
+  // — so restart the stream, the way the blank-screen toggle restarts the
+  // mirror. With no stream up the setting is simply stored for the next one.
+  function setRotation(degrees) {
+    var which = rotationTarget
+    updateSetting(which === "front" ? "frontRotation" : "backRotation", degrees)
+    if (camera === which)
+      setCamera(which, which === "front" ? { front: degrees } : { back: degrees })
+  }
+
+  // key is the setting name, field the override setCamera above understands.
+  function setCaptureQuality(key, field, value) {
+    updateSetting(key, value)
+    if (camera === "back" || camera === "front") {
+      var overrides = {}
+      overrides[field] = value
+      setCamera(camera, overrides)
+    }
+  }
+
+  // The viewfinder reads the loopback node rather than the phone, so it shows
+  // exactly what a call would get — rotation, framing, exposure and all.
+  function toggleView() {
+    runAction([bin("dori-view"), "toggle", "--device", videoDevice])
   }
 
   // `screenOff` is an optional override: the blank-screen toggle needs to build
@@ -563,6 +625,113 @@ Panel {
                 enabled: modelData.value === "off" || (root.ready && root.loopback)
                 opacity: enabled ? 1 : 0.4
                 onClicked: root.setCamera(modelData.value)
+              }
+            }
+          }
+
+          // Checking framing used to mean joining a call to look at yourself.
+          // This reads the loopback node, not the phone, so what it shows is
+          // exactly what the far end gets — rotation and cropping included.
+          // It needs a stream to read: exclusive_caps hides the capture side
+          // of the node until something is writing to it.
+          Button {
+            width: parent.width
+            iconText: root.viewing ? "󰈉" : "󰈈"
+            iconSize: Style.font.title
+            text: root.viewing ? "Close viewfinder" : "Viewfinder"
+            fontSize: Style.font.bodySmall
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            verticalPadding: Style.spacing.controlPaddingY + Style.space(2)
+            bordered: true
+            active: root.viewing
+            enabled: root.viewing || (root.camera !== "off" && root.loopback)
+            opacity: enabled ? 1 : 0.4
+            tooltipText: root.camera === "off"
+              ? "Start the back or front camera first"
+              : "Watch " + root.videoDevice + " — what a call would see"
+            onClicked: root.toggleView()
+          }
+
+          // Phones mount their sensors every which way, and a webcam that is
+          // upside down in Meet is not something the far end can fix. The
+          // control follows the camera buttons above it, and says which one it
+          // is about so a value set here is never a surprise on the other one.
+          Column {
+            width: parent.width
+            spacing: Style.space(6)
+
+            InfoLabel {
+              text: root.rotationTarget === "front"
+                ? "Front camera rotation" : "Back camera rotation"
+            }
+
+            ButtonGroup {
+              width: parent.width
+              options: [
+                { value: "0", label: "0°" },
+                { value: "90", label: "90°" },
+                { value: "180", label: "180°" },
+                { value: "270", label: "270°" }
+              ]
+              value: root.rotation
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onChanged: function(next) { root.setRotation(next) }
+            }
+          }
+
+          // Capture size and rate. 1080p at 30 is what a call actually shows;
+          // 4K at 60 mostly heats the phone up and gets scaled back down at
+          // the far end. Side by side because they are the same decision.
+          Row {
+            id: qualityRow
+            width: parent.width
+            spacing: Style.space(14)
+
+            readonly property real cellWidth: (width - spacing) / 2
+
+            Column {
+              width: qualityRow.cellWidth
+              spacing: Style.space(6)
+
+              InfoLabel { text: "Resolution" }
+
+              ButtonGroup {
+                options: [
+                  { value: "1280", label: "720p" },
+                  { value: "1920", label: "1080p" },
+                  { value: "3840", label: "4K" }
+                ]
+                value: String(root.cameraMaxSize)
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                fontSize: Style.font.bodySmall
+                onChanged: function(next) {
+                  root.setCaptureQuality("cameraMaxSize", "maxSize", Number(next))
+                }
+              }
+            }
+
+            Column {
+              width: qualityRow.cellWidth
+              spacing: Style.space(6)
+
+              InfoLabel { text: "Frame rate" }
+
+              ButtonGroup {
+                options: [
+                  { value: "15", label: "15" },
+                  { value: "30", label: "30" },
+                  { value: "60", label: "60" }
+                ]
+                value: String(root.cameraFps)
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                fontSize: Style.font.bodySmall
+                onChanged: function(next) {
+                  root.setCaptureQuality("cameraFps", "fps", Number(next))
+                }
               }
             }
           }

@@ -8,8 +8,8 @@
 #   --device DEV          loopback node to write into (default /dev/video10)
 #   --back-id N           camera id for "back"  (default 0)
 #   --front-id N          camera id for "front" (default 1)
-#   --front-rotation DEG  0|90|180|270, for phones that deliver the front
-#                         sensor upside down (default 0)
+#   --back-rotation DEG   0|90|180|270, clockwise, for a sensor that arrives
+#   --front-rotation DEG  rotated or upside down (default 0 for both)
 #   --max-size PX         longest edge, 0 for native (default 1920)
 #   --fps N               capture frame rate (default 30)
 #
@@ -24,6 +24,7 @@ set -uo pipefail
 DEVICE="${DORI_V4L2_DEVICE:-/dev/video10}"
 BACK_ID=0
 FRONT_ID=1
+BACK_ROTATION=0
 FRONT_ROTATION=0
 MAX_SIZE=1920
 FPS=30
@@ -37,6 +38,7 @@ while (($# > 0)); do
     --device) DEVICE="${2:-}"; shift 2 ;;
     --back-id) BACK_ID="${2:-0}"; shift 2 ;;
     --front-id) FRONT_ID="${2:-1}"; shift 2 ;;
+    --back-rotation) BACK_ROTATION="${2:-0}"; shift 2 ;;
     --front-rotation) FRONT_ROTATION="${2:-0}"; shift 2 ;;
     --max-size) MAX_SIZE="${2:-1920}"; shift 2 ;;
     --fps) FPS="${2:-30}"; shift 2 ;;
@@ -90,9 +92,21 @@ sink_open() {
 
 require_ready() {
   if [[ ! -c $DEVICE ]]; then
-    notify -u critical "Dori" \
-      "No webcam device at $DEVICE. Run dori-setup once to load v4l2loopback."
-    echo "dori-camera: $DEVICE is not a character device; run dori-setup" >&2
+    # "Run dori-setup" is only useful advice when the module is not up. When it
+    # is loaded and the node still does not exist, something else on this
+    # machine owns the module — it was loaded with devices=0, or without the
+    # video_nr this expects — and saying so saves a lot of digging.
+    if [[ -d /sys/module/v4l2loopback ]]; then
+      notify -u critical "Dori" \
+        "v4l2loopback is loaded but nothing created $DEVICE. Another tool may own the module; run dori-setup."
+      echo "dori-camera: v4l2loopback is loaded but $DEVICE does not exist;" >&2
+      echo "  another v4l2loopback user may own the module. Run dori-setup," >&2
+      echo "  which adds Dori's own node without disturbing theirs." >&2
+    else
+      notify -u critical "Dori" \
+        "No webcam device at $DEVICE. Run dori-setup once to set up v4l2loopback."
+      echo "dori-camera: $DEVICE is not a character device; run dori-setup" >&2
+    fi
     exit 1
   fi
   if [[ -z "$(dori_serial)" ]]; then
@@ -104,9 +118,15 @@ require_ready() {
 
 start_stream() {
   local cam=$1 label=$2
-  local rotate=()
-  [[ $label == "front" && $FRONT_ROTATION != "0" ]] &&
-    rotate=(--capture-orientation="$FRONT_ROTATION")
+  # Each sensor is mounted its own way round, so back and front carry their own
+  # rotation. scrcpy only reads this at launch, which is why changing it has to
+  # restart the stream rather than nudge a live one.
+  local rotate=() degrees=0
+  case "$label" in
+    back) degrees=$BACK_ROTATION ;;
+    front) degrees=$FRONT_ROTATION ;;
+  esac
+  [[ $degrees != "0" ]] && rotate=(--capture-orientation="$degrees")
 
   require_ready
   dori_require_user_systemd || exit 1
