@@ -61,6 +61,11 @@ fi
 DEVICE="/dev/video$VIDEO_NR"
 SYSNAME="/sys/class/video4linux/video$VIDEO_NR/name"
 
+die() {
+  printf '  \033[31m✗\033[0m %s\n' "$*" >&2
+  exit 1
+}
+
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 ok() { printf '  \033[32m✓\033[0m %s\n' "$*"; }
 warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
@@ -79,8 +84,20 @@ node_label() {
 
 is_ours() { [[ "$(node_label)" == "$LABEL" ]]; }
 
+# Every privileged step below assumes sudo can actually ask for a password.
+# With no terminal to ask from it cannot, and it fails one command at a time —
+# which is how this script used to print a tick after each write that never
+# happened. Ask once, up front, and stop here if the answer is no.
+require_sudo() {
+  sudo -v && return 0
+  echo >&2
+  die "sudo could not get your password. Run dori-setup from a terminal window
+    rather than through an editor, a script, or a remote session without a tty."
+}
+
 if [[ $ACTION == "uninstall" ]]; then
   say "Removing Dori's host setup"
+  require_sudo
 
   if [[ -f $UNIT ]]; then
     sudo systemctl disable --now dori-v4l2loopback.service >/dev/null 2>&1
@@ -92,7 +109,9 @@ if [[ $ACTION == "uninstall" ]]; then
     "$(dirname "$HELPER")" 2>/dev/null && ok "removed $HELPER"
 
   for legacy in "$LEGACY_MODPROBE" "$LEGACY_MODULES"; do
-    [[ -e $legacy ]] && sudo rm -f "$legacy" && ok "removed $legacy"
+    if [[ -e $legacy ]]; then
+      sudo rm -f "$legacy" && ok "removed $legacy"
+    fi
   done
 
   # Only Dori's own node, and only if it still is Dori's. The module stays
@@ -115,6 +134,8 @@ if [[ $ACTION == "uninstall" ]]; then
   echo "  sudo pacman -Rns v4l2loopback-dkms v4l2loopback-utils scrcpy android-tools"
   exit 0
 fi
+
+require_sudo
 
 say "1. Packages"
 if command -v pacman >/dev/null 2>&1; then
@@ -148,17 +169,25 @@ say "2. Persistent webcam device ($DEVICE)"
 # keep overriding another consumer's devices= at the next boot.
 for legacy in "$LEGACY_MODPROBE" "$LEGACY_MODULES"; do
   if [[ -e $legacy ]]; then
-    sudo rm -f "$legacy"
+    sudo rm -f "$legacy" || die "could not remove $legacy"
     ok "removed $legacy, left over from an older Dori"
   fi
 done
 
-sudo install -d -m 755 "$(dirname "$HELPER")"
+sudo install -d -m 755 "$(dirname "$HELPER")" ||
+  die "could not create $(dirname "$HELPER")"
+
+# Staged in a temp file and put in place with install(1), rather than piped
+# straight into a privileged tee: install sets the mode and owner as it copies,
+# and its exit status actually says whether the file was written. A tee whose
+# sudo failed still exits 0 through the pipe.
+STAGE=$(mktemp) || die "could not create a temporary file"
+trap 'rm -f "$STAGE"' EXIT
 
 # Root runs this at every boot, so it is written into /usr/local/lib rather
 # than run out of the plugin folder: that folder lives in a home directory
 # which is both writable by the user and possibly not mounted this early.
-sudo tee "$HELPER" >/dev/null <<HELPER_EOF
+cat >"$STAGE" <<HELPER_EOF
 #!/bin/sh
 # Create Dori's v4l2loopback node. Written by dori-setup; edit that instead.
 #
@@ -191,10 +220,10 @@ fi
 
 exec v4l2loopback-ctl add -n "\$LABEL" -x 1 "\$DEVICE"
 HELPER_EOF
-sudo chmod 755 "$HELPER"
+sudo install -m 755 -o root -g root "$STAGE" "$HELPER" || die "could not write $HELPER"
 ok "wrote $HELPER"
 
-sudo tee "$UNIT" >/dev/null <<UNIT_EOF
+cat >"$STAGE" <<UNIT_EOF
 [Unit]
 Description=Dedicated v4l2loopback node for Dori ($DEVICE)
 Documentation=https://github.com/infiniV/omarchy-dori
@@ -208,9 +237,10 @@ ExecStart=$HELPER
 [Install]
 WantedBy=multi-user.target
 UNIT_EOF
+sudo install -m 644 -o root -g root "$STAGE" "$UNIT" || die "could not write $UNIT"
 ok "wrote $UNIT"
 
-sudo systemctl daemon-reload
+sudo systemctl daemon-reload || die "systemctl daemon-reload failed"
 
 say "3. Creating it now"
 if [[ -c $DEVICE ]] && ! is_ours; then
