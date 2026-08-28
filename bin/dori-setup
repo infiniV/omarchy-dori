@@ -6,20 +6,36 @@
 #
 # It does three things, each skipped when already done:
 #
-#   1. installs scrcpy, android-tools, and v4l2loopback-dkms with pacman
-#   2. writes /etc/modprobe.d and /etc/modules-load.d entries so the loopback
-#      webcam exists after every reboot
-#   3. loads the module now, so nothing has to be rebooted today
+#   1. installs scrcpy, android-tools, v4l-utils and v4l2loopback with pacman
+#   2. creates Dori's own loopback node with v4l2loopback-ctl, and a systemd
+#      unit that recreates it after every reboot
+#   3. leaves every other v4l2loopback consumer on the machine alone
 #
-# Undo it with dori-setup --uninstall, which removes only the two files it
-# wrote and unloads the module.
+# Dori used to write /etc/modprobe.d/dori-v4l2loopback.conf and reload the
+# module. That only works on a machine where nothing else uses v4l2loopback.
+# modprobe applies parameters at load time and nowhere else, so on a host
+# where the module was already up — OBS, Droidcam, omarchy-camera-effects —
+# the reload was a silent no-op and no node ever appeared; and the options
+# line fought the other tool's for the same module at the next boot.
+#
+# Adding a node through /dev/v4l2loopback instead (v4l2loopback 0.13 and
+# newer) needs no parameters, no reload, and no shared config file, so two
+# tools can hold two nodes at once. If an older dori-v4l2loopback.conf is
+# still lying around from that approach, this removes it.
+#
+# Undo it with dori-setup --uninstall, which deletes Dori's own node and the
+# files it wrote, and leaves the module loaded for whoever else is using it.
 
 set -uo pipefail
 
 VIDEO_NR=10
 LABEL="Phone Camera"
-MODPROBE_CONF="/etc/modprobe.d/dori-v4l2loopback.conf"
-MODULES_CONF="/etc/modules-load.d/dori-v4l2loopback.conf"
+UNIT="/etc/systemd/system/dori-v4l2loopback.service"
+HELPER="/usr/local/lib/dori/loopback-node"
+# Written by the modprobe.d approach this replaced. Only ever removed, never
+# created, so a host upgrading from 1.0.0 stops fighting its other consumers.
+LEGACY_MODPROBE="/etc/modprobe.d/dori-v4l2loopback.conf"
+LEGACY_MODULES="/etc/modules-load.d/dori-v4l2loopback.conf"
 ACTION="install"
 
 while (($# > 0)); do
@@ -27,7 +43,7 @@ while (($# > 0)); do
     --device-number) VIDEO_NR="${2:-10}"; shift 2 ;;
     --uninstall) ACTION="uninstall"; shift ;;
     -h | --help)
-      sed -n '2,17p' "$0"
+      sed -n '2,27p' "$0"
       exit 0
       ;;
     *)
@@ -37,24 +53,89 @@ while (($# > 0)); do
   esac
 done
 
+if [[ ! $VIDEO_NR =~ ^[0-9]+$ ]]; then
+  echo "dori-setup: --device-number takes a number, not '$VIDEO_NR'" >&2
+  exit 1
+fi
+
+DEVICE="/dev/video$VIDEO_NR"
+SYSNAME="/sys/class/video4linux/video$VIDEO_NR/name"
+
+die() {
+  printf '  \033[31m✗\033[0m %s\n' "$*" >&2
+  exit 1
+}
+
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 ok() { printf '  \033[32m✓\033[0m %s\n' "$*"; }
 warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
 
+# Who owns /dev/videoN, by the card label the driver reports. Matched whole,
+# not as a substring: omarchy-camera-effects guards its own node with
+# `v4l2loopback-ctl list | grep -q "Camera Effects"`, and a loose match like
+# that is exactly how one tool ends up skipping its own device because
+# another tool's label happened to contain the same words.
+node_label() {
+  [[ -r $SYSNAME ]] || return 1
+  local name
+  read -r name <"$SYSNAME" || return 1
+  printf '%s\n' "$name"
+}
+
+is_ours() { [[ "$(node_label)" == "$LABEL" ]]; }
+
+# Every privileged step below assumes sudo can actually ask for a password.
+# With no terminal to ask from it cannot, and it fails one command at a time —
+# which is how this script used to print a tick after each write that never
+# happened. Ask once, up front, and stop here if the answer is no.
+require_sudo() {
+  sudo -v && return 0
+  echo >&2
+  die "sudo could not get your password. Run dori-setup from a terminal window
+    rather than through an editor, a script, or a remote session without a tty."
+}
+
 if [[ $ACTION == "uninstall" ]]; then
   say "Removing Dori's host setup"
-  sudo rm -f "$MODPROBE_CONF" "$MODULES_CONF"
-  ok "removed $MODPROBE_CONF and $MODULES_CONF"
-  if sudo modprobe -r v4l2loopback 2>/dev/null; then
-    ok "unloaded v4l2loopback"
-  else
-    warn "v4l2loopback is in use; it will be gone after the next reboot"
+  require_sudo
+
+  if [[ -f $UNIT ]]; then
+    sudo systemctl disable --now dori-v4l2loopback.service >/dev/null 2>&1
+    sudo rm -f "$UNIT"
+    sudo systemctl daemon-reload
+    ok "removed $UNIT"
   fi
+  [[ -e $HELPER ]] && sudo rm -f "$HELPER" && sudo rmdir --ignore-fail-on-non-empty \
+    "$(dirname "$HELPER")" 2>/dev/null && ok "removed $HELPER"
+
+  for legacy in "$LEGACY_MODPROBE" "$LEGACY_MODULES"; do
+    if [[ -e $legacy ]]; then
+      sudo rm -f "$legacy" && ok "removed $legacy"
+    fi
+  done
+
+  # Only Dori's own node, and only if it still is Dori's. The module stays
+  # loaded: unloading it would take every other consumer's node down with it.
+  if [[ -c $DEVICE ]]; then
+    if is_ours; then
+      if sudo v4l2loopback-ctl delete "$DEVICE" 2>/dev/null; then
+        ok "deleted $DEVICE"
+      else
+        warn "$DEVICE is in use; it will be gone after the next reboot"
+      fi
+    else
+      warn "$DEVICE is \"$(node_label)\", not Dori's — left alone"
+    fi
+  fi
+
   echo
+  echo "v4l2loopback is left loaded, in case something else on this machine is using it."
   echo "The packages are left installed. Remove them yourself if nothing else uses them:"
-  echo "  sudo pacman -Rns v4l2loopback-dkms scrcpy android-tools"
+  echo "  sudo pacman -Rns v4l2loopback-dkms v4l2loopback-utils scrcpy android-tools"
   exit 0
 fi
+
+require_sudo
 
 say "1. Packages"
 if command -v pacman >/dev/null 2>&1; then
@@ -63,43 +144,125 @@ if command -v pacman >/dev/null 2>&1; then
   command -v adb >/dev/null 2>&1 || missing+=(android-tools)
   command -v v4l2-ctl >/dev/null 2>&1 || missing+=(v4l-utils)
   modinfo v4l2loopback >/dev/null 2>&1 || missing+=(v4l2loopback-dkms)
+  # v4l2loopback-dkms ships the module and nothing else; v4l2loopback-ctl,
+  # which is now how the node gets made, is in v4l2loopback-utils.
+  command -v v4l2loopback-ctl >/dev/null 2>&1 || missing+=(v4l2loopback-utils)
   /usr/bin/python3 -c 'import gi' 2>/dev/null || missing+=(python-gobject)
   if ((${#missing[@]})); then
     echo "  installing: ${missing[*]}"
     sudo pacman -S --needed "${missing[@]}" || exit 1
   fi
-  ok "scrcpy, android-tools, v4l-utils, v4l2loopback-dkms, python-gobject present"
+  ok "scrcpy, android-tools, v4l-utils, v4l2loopback, python-gobject present"
 else
-  warn "not an Arch system; install scrcpy, android-tools, v4l-utils, v4l2loopback and python-gobject yourself"
+  warn "not an Arch system; install scrcpy, android-tools, v4l-utils,"
+  warn "v4l2loopback (module and utils) and python-gobject yourself"
 fi
 
-say "2. Persistent webcam device (/dev/video$VIDEO_NR)"
-printf 'options v4l2loopback devices=1 video_nr=%s card_label="%s" exclusive_caps=1\n' \
-  "$VIDEO_NR" "$LABEL" | sudo tee "$MODPROBE_CONF" >/dev/null
-ok "wrote $MODPROBE_CONF"
-printf 'v4l2loopback\n' | sudo tee "$MODULES_CONF" >/dev/null
-ok "wrote $MODULES_CONF"
+if ! command -v v4l2loopback-ctl >/dev/null 2>&1; then
+  echo "dori-setup: v4l2loopback-ctl is missing; install v4l2loopback-utils" >&2
+  exit 1
+fi
 
-say "3. Loading it now"
-if [[ -c "/dev/video$VIDEO_NR" ]]; then
-  ok "/dev/video$VIDEO_NR already exists"
-else
-  sudo modprobe v4l2loopback || {
-    warn "modprobe failed; a reboot may be needed for the dkms module to build"
+say "2. Persistent webcam device ($DEVICE)"
+
+# The old modprobe.d file is the bug this replaced: left in place it would
+# keep overriding another consumer's devices= at the next boot.
+for legacy in "$LEGACY_MODPROBE" "$LEGACY_MODULES"; do
+  if [[ -e $legacy ]]; then
+    sudo rm -f "$legacy" || die "could not remove $legacy"
+    ok "removed $legacy, left over from an older Dori"
+  fi
+done
+
+sudo install -d -m 755 "$(dirname "$HELPER")" ||
+  die "could not create $(dirname "$HELPER")"
+
+# Staged in a temp file and put in place with install(1), rather than piped
+# straight into a privileged tee: install sets the mode and owner as it copies,
+# and its exit status actually says whether the file was written. A tee whose
+# sudo failed still exits 0 through the pipe.
+STAGE=$(mktemp) || die "could not create a temporary file"
+trap 'rm -f "$STAGE"' EXIT
+
+# Root runs this at every boot, so it is written into /usr/local/lib rather
+# than run out of the plugin folder: that folder lives in a home directory
+# which is both writable by the user and possibly not mounted this early.
+cat >"$STAGE" <<HELPER_EOF
+#!/bin/sh
+# Create Dori's v4l2loopback node. Written by dori-setup; edit that instead.
+#
+# Adding a node through the control device needs no module parameters, so it
+# neither disturbs nor is disturbed by any other v4l2loopback user.
+set -u
+
+DEVICE="$DEVICE"
+LABEL="$LABEL"
+SYSNAME="$SYSNAME"
+
+# The module has to be resident for the control device to exist, but loading
+# it must not create anyone a node: devices=0 on the command line wins over
+# whatever another tool's modprobe.d asked for, and only for this load.
+if [ ! -c /dev/v4l2loopback ]; then
+  modprobe v4l2loopback devices=0 || {
+    echo "dori: could not load v4l2loopback" >&2
     exit 1
   }
-  if [[ -c "/dev/video$VIDEO_NR" ]]; then
-    ok "/dev/video$VIDEO_NR created"
-  else
-    warn "module loaded but /dev/video$VIDEO_NR is missing; check $MODPROBE_CONF"
-  fi
+fi
+
+# Already there and already ours: nothing to do. Compared whole rather than
+# grepped, so a node whose label merely contains ours is not mistaken for it.
+if [ -r "\$SYSNAME" ]; then
+  read -r have <"\$SYSNAME"
+  [ "\$have" = "\$LABEL" ] && exit 0
+  echo "dori: \$DEVICE is \"\$have\", not Dori's; choose another device number" >&2
+  exit 1
+fi
+
+exec v4l2loopback-ctl add -n "\$LABEL" -x 1 "\$DEVICE"
+HELPER_EOF
+sudo install -m 755 -o root -g root "$STAGE" "$HELPER" || die "could not write $HELPER"
+ok "wrote $HELPER"
+
+cat >"$STAGE" <<UNIT_EOF
+[Unit]
+Description=Dedicated v4l2loopback node for Dori ($DEVICE)
+Documentation=https://github.com/infiniV/omarchy-dori
+After=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$HELPER
+
+[Install]
+WantedBy=multi-user.target
+UNIT_EOF
+sudo install -m 644 -o root -g root "$STAGE" "$UNIT" || die "could not write $UNIT"
+ok "wrote $UNIT"
+
+sudo systemctl daemon-reload || die "systemctl daemon-reload failed"
+
+say "3. Creating it now"
+if [[ -c $DEVICE ]] && ! is_ours; then
+  warn "$DEVICE already exists as \"$(node_label)\" and belongs to something else."
+  echo "      Pick a free number instead, and set the same one in Dori's settings:"
+  echo "      dori-setup --device-number 11"
+  exit 1
+fi
+
+if sudo systemctl enable --now dori-v4l2loopback.service >/dev/null 2>&1 &&
+  [[ -c $DEVICE ]] && is_ours; then
+  ok "$DEVICE is \"$LABEL\", and comes back after a reboot"
+else
+  warn "could not create $DEVICE. See: systemctl status dori-v4l2loopback.service"
+  exit 1
 fi
 
 # logind hands the active local session an ACL on /dev/video*, so the video
 # group is usually unnecessary. Only say something when the node is actually
 # unreadable, rather than sending everyone off to run usermod for nothing.
-if [[ -c "/dev/video$VIDEO_NR" && ! -r "/dev/video$VIDEO_NR" ]]; then
-  warn "/dev/video$VIDEO_NR is not readable by you. Try:"
+if [[ ! -r $DEVICE ]]; then
+  warn "$DEVICE is not readable by you. Try:"
   echo "      sudo usermod -aG video $USER   # then log out and back in"
 fi
 

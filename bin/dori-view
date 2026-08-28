@@ -1,0 +1,155 @@
+#!/bin/bash
+# Open a window on the loopback node, so you can see what the phone camera is
+# actually sending before a call sees it.
+#
+#   dori-view start | stop | toggle
+#
+#   --device DEV   loopback node to read (default /dev/video10)
+#   --player NAME  mpv or ffplay; the default is whichever is installed
+#
+# The picture is not mirrored. A viewfinder that flips you left-to-right is
+# nicer for fixing your hair and useless for checking framing, and framing is
+# what this is for: what you see here is what the far end gets.
+#
+# The node only presents itself as a capture device while something is writing
+# to it — that is what exclusive_caps does — so something has to be streaming
+# into it first. Usually that is dori-camera back|front.
+
+set -uo pipefail
+
+# shellcheck source=dori-lib.sh
+. "$(dirname "$(readlink -f "$0")")/dori-lib.sh" || exit 1
+
+DEVICE="${DORI_V4L2_DEVICE:-/dev/video10}"
+PLAYER=""
+RUNDIR=$(dori_rundir) || exit 1
+MODE=""
+
+LOG="$RUNDIR/view.log"
+
+while (($# > 0)); do
+  case "$1" in
+    --device) DEVICE="${2:-}"; shift 2 ;;
+    --player) PLAYER="${2:-}"; shift 2 ;;
+    -h | --help)
+      sed -n '2,17p' "$0"
+      exit 0
+      ;;
+    -*)
+      echo "dori-view: unknown flag $1" >&2
+      exit 1
+      ;;
+    *) MODE="$1"; shift ;;
+  esac
+done
+MODE="${MODE:-toggle}"
+
+notify() { command -v notify-send >/dev/null 2>&1 && notify-send "$@"; }
+
+viewing() { dori_unit_active view; }
+
+# Is anything feeding the node? With exclusive_caps=1 the loopback advertises
+# Video Output while it is idle and Video Capture once a writer has it, so the
+# capability is the honest answer. Without v4l2-ctl there is nothing to ask,
+# and letting the player try and fail beats refusing on a guess.
+writer_present() {
+  command -v v4l2-ctl >/dev/null 2>&1 || return 0
+  v4l2-ctl --device="$DEVICE" --all 2>/dev/null |
+    sed -n '/Device Caps/,/^[^\t]/p' | grep -q 'Video Capture'
+}
+
+stop_view() { dori_unit_stop view; }
+
+# mpv first: it takes a window title, so the Hyprland rule that would float
+# this has something to match on, and its low-latency profile does not build
+# up the several seconds of buffer that make a viewfinder useless for framing.
+pick_player() {
+  if [[ -n $PLAYER ]]; then
+    command -v "$PLAYER" >/dev/null 2>&1 && { echo "$PLAYER"; return 0; }
+    echo "dori-view: $PLAYER is not installed" >&2
+    return 1
+  fi
+  for candidate in mpv ffplay; do
+    command -v "$candidate" >/dev/null 2>&1 && { echo "$candidate"; return 0; }
+  done
+  return 1
+}
+
+player_command() {
+  case "$1" in
+    mpv)
+      printf '%s\0' mpv --profile=low-latency --untimed --no-cache \
+        --title="Dori viewfinder — $DEVICE" \
+        --force-window=immediate "av://v4l2:$DEVICE"
+      ;;
+    ffplay)
+      printf '%s\0' ffplay -hide_banner -loglevel warning -fflags nobuffer \
+        -f v4l2 -window_title "Dori viewfinder — $DEVICE" -i "$DEVICE"
+      ;;
+    *)
+      # Anything else is taken at its word and handed the device.
+      printf '%s\0' "$1" "$DEVICE"
+      ;;
+  esac
+}
+
+start_view() {
+  if [[ ! -c $DEVICE ]]; then
+    notify -u critical "Dori" "No webcam device at $DEVICE. Run dori-setup once."
+    echo "dori-view: $DEVICE is not a character device" >&2
+    exit 1
+  fi
+
+  local player
+  player=$(pick_player) || {
+    notify -u critical "Dori" "No video player. Install mpv or ffmpeg to use the viewfinder."
+    echo "dori-view: neither mpv nor ffplay is installed" >&2
+    exit 1
+  }
+
+  # exclusive_caps hides the capture side of the node until a writer opens it:
+  # idle, it reports Video Output only, and the player fails with something
+  # unhelpful about an invalid argument. Ask the node itself rather than
+  # assuming the writer is Dori's — a scrcpy you started by hand feeds this
+  # just as well, and refusing to show it would be a lie about the device.
+  if ! writer_present; then
+    notify "Dori" "Nothing is writing to $DEVICE. Start the back or front camera first."
+    echo "dori-view: $DEVICE has no writer; start one with dori-camera back" >&2
+    exit 1
+  fi
+
+  local cmd=()
+  mapfile -d '' -t cmd < <(player_command "$player")
+
+  : >"$LOG"
+  dori_unit_start view "$LOG" "Dori viewfinder on $DEVICE" "${cmd[@]}" || {
+    echo "dori-view: could not start the dori-view unit" >&2
+    exit 1
+  }
+
+  # The window either comes up or the player exits complaining; either way it
+  # has happened within a second or so, and a unit that is already gone is a
+  # failure worth reporting rather than a viewfinder the user will hunt for.
+  local _
+  for _ in {1..10}; do
+    dori_unit_active view || break
+    sleep 0.2
+  done
+  if ! dori_unit_active view; then
+    notify -u critical "Dori" "Viewfinder closed straight away. See $LOG"
+    echo "dori-view: the player exited immediately; see $LOG" >&2
+    exit 1
+  fi
+}
+
+case "$MODE" in
+  start) viewing || start_view ;;
+  stop | off) stop_view ;;
+  toggle)
+    if viewing; then stop_view; else start_view; fi
+    ;;
+  *)
+    echo "Usage: dori-view <start|stop|toggle> [flags]" >&2
+    exit 1
+    ;;
+esac

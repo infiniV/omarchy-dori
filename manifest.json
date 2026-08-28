@@ -32,7 +32,10 @@
       "videoDevice": "/dev/video10",
       "backCameraId": 0,
       "frontCameraId": 1,
+      "backRotation": 0,
       "frontRotation": 0,
+      "cameraMaxSize": 1920,
+      "cameraFps": 30,
       "livePreview": true,
       "keyboardMode": "sdk"
     },
@@ -49,7 +52,7 @@
         "type": "path",
         "label": "Webcam device",
         "defaultValue": "/dev/video10",
-        "description": "The v4l2loopback node the camera is streamed into. Must match the video_nr set when the module is loaded."
+        "description": "The v4l2loopback node the camera is streamed into. Must match the one dori-setup made; if you moved it, run `dori-setup --device-number N` with the same number."
       },
       {
         "key": "backCameraId",
@@ -71,6 +74,19 @@
         "defaultValue": 1
       },
       {
+        "key": "backRotation",
+        "type": "enum",
+        "label": "Back camera rotation",
+        "options": [
+          "0",
+          "90",
+          "180",
+          "270"
+        ],
+        "defaultValue": "0",
+        "description": "Clockwise, for a phone that hands over the back sensor rotated. Set 180 if the picture is upside down. Also on the panel, under CAMERA."
+      },
+      {
         "key": "frontRotation",
         "type": "enum",
         "label": "Front camera rotation",
@@ -81,7 +97,31 @@
           "270"
         ],
         "defaultValue": "0",
-        "description": "Some phones deliver the front sensor upside down. Set 180 if yours does."
+        "description": "The same, for the front sensor. The two are separate because the two are mounted differently."
+      },
+      {
+        "key": "cameraMaxSize",
+        "type": "enum",
+        "label": "Camera resolution",
+        "options": [
+          "1280",
+          "1920",
+          "3840"
+        ],
+        "defaultValue": "1920",
+        "description": "Longest edge of the captured picture: 1280 is 720p, 1920 is 1080p, 3840 is 4K. Higher costs the phone battery and heat for detail most calls scale away again. Also on the panel, under CAMERA."
+      },
+      {
+        "key": "cameraFps",
+        "type": "enum",
+        "label": "Camera frame rate",
+        "options": [
+          "15",
+          "30",
+          "60"
+        ],
+        "defaultValue": "30",
+        "description": "Capture rate for the webcam stream. 30 is what video calls use; 60 is for recording something that moves."
       },
       {
         "key": "codec",
