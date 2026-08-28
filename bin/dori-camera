@@ -106,11 +106,17 @@ restore_viewfinder() {
 
 # Whether the unit's scrcpy has the loopback node open. Read-only: the pid is
 # looked at, never signalled, so a recycled pid can at worst delay the answer.
+# The fds are resolved with readlink rather than scraped out of `ls -l`, which
+# would match a device name appearing anywhere in the listing and depends on
+# the listing's format to boot.
 sink_open() {
-  local pid
+  local pid fd
   pid=$(systemctl --user show "$(dori_unit camera)" -p MainPID --value 2>/dev/null)
   [[ $pid =~ ^[0-9]+$ && $pid -gt 0 ]] || return 1
-  ls -l /proc/"$pid"/fd 2>/dev/null | grep -qF -- " $DEVICE"
+  for fd in /proc/"$pid"/fd/*; do
+    [[ "$(readlink -- "$fd" 2>/dev/null)" == "$DEVICE" ]] && return 0
+  done
+  return 1
 }
 
 require_ready() {
@@ -168,8 +174,8 @@ start_stream() {
   # until it exits so there is nothing to read there. The stream is up when
   # the unit's process has the sink open. Over Wi-Fi that takes several
   # seconds, so wait for it rather than guessing.
-  local i
-  for i in {1..24}; do
+  local _
+  for _ in {1..24}; do
     dori_unit_active camera || break
     sink_open && break
     sleep 0.4

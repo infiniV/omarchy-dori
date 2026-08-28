@@ -17,7 +17,10 @@ dori_rundir() {
   else
     dir="/tmp/dori-$uid"
   fi
-  mkdir -p -m 700 "$dir" 2>/dev/null
+  # No -p: the parent ($XDG_RUNTIME_DIR, or /tmp) always exists already, and
+  # under -p the mode applies only to the deepest directory — so dropping it
+  # keeps 0700 guaranteed at creation rather than set a moment afterwards.
+  mkdir -m 700 "$dir" 2>/dev/null
   if [[ -L $dir || ! -d $dir ]] || [[ "$(stat -c %u "$dir" 2>/dev/null)" != "$uid" ]]; then
     echo "dori: $dir is not a directory this user owns; refusing to use it" >&2
     return 1
