@@ -18,7 +18,12 @@ body:
     id: status
     attributes:
       label: Output of `bin/dori-status`
-      description: Run it with the phone attached, the way it was when the bug happened.
+      description: >-
+        Run it with the phone attached, the way it was when the bug happened.
+        This is a public issue, so replace anything you would rather not
+        publish before pasting: `serial` identifies your handset, and
+        `recordingFile` is a path on your machine. Both can be replaced with
+        `null` without making the report less useful.
       render: json
     validations:
       required: true

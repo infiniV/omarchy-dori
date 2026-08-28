@@ -35,7 +35,10 @@ These are not style preferences; getting them wrong has broken Dori before.
   user can write.
 - **Nothing the phone sends is trusted as shell input.** Device output goes
   into arrays and quoted expansions, never into a string that a shell parses.
-- **`shellcheck bin/dori-*` is clean** before you open a pull request.
+- **`shellcheck --shell=bash --external-sources --source-path=bin bin/dori-*` is
+  clean** before you open a pull request. That is exactly what CI runs;
+  `--source-path` is what lets the scripts' `# shellcheck source=dori-lib.sh`
+  directives resolve, since they build that path at runtime.
 - Settings keys in `manifest.json` must match the keys the scripts and
   `Panel.qml` actually read. CI checks the manifest parses; matching keys is on
   you.

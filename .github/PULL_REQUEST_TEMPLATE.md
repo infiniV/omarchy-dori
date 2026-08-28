@@ -18,7 +18,7 @@
 
 ## Checklist
 
-- [ ] `shellcheck bin/dori-*` is clean
+- [ ] `shellcheck --shell=bash --external-sources --source-path=bin bin/dori-*` is clean
 - [ ] No new long-running process that is not a named systemd user unit
 - [ ] Nothing Dori did not start gets killed
 - [ ] `manifest.json` settings keys match what the code reads
