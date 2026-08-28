@@ -96,3 +96,27 @@ dori_require_user_systemd() {
   echo "dori: no systemd user session; Dori runs its services as user units and cannot start without one" >&2
   return 1
 }
+
+# adb has no lock around starting its own server. A client that finds nothing
+# listening forks one itself, so two clients started at the same instant both
+# fork, race to bind, and the loser dies on LOG(FATAL): "could not install
+# *smartsocket* listener: Address already in use". That surfaces as a SIGABRT
+# core dump and a desktop crash notification, not as anything readable.
+#
+# Dori hits it on every multi-monitor login. The bar is built once per monitor,
+# so each panel runs its own dori-status at the same moment, and the guard in
+# refresh() is per-instance and cannot see the other panel.
+#
+# Bring the server up under a lock first. Whoever takes the lock second finds it
+# already listening and start-server returns without forking. The lock covers
+# only the start, so concurrent adb work still runs concurrently, and a stuck
+# holder times out into today's behaviour rather than wedging the caller.
+dori_adb_ready() {
+  local dir lock_fd
+  dir=$(dori_rundir) || return 0
+  exec {lock_fd}>"$dir/adb-start.lock" 2>/dev/null || return 0
+  flock -w 10 "$lock_fd" 2>/dev/null
+  adb start-server >/dev/null 2>&1
+  exec {lock_fd}>&-
+  return 0
+}

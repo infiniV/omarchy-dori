@@ -43,6 +43,10 @@ while (($# > 0)); do
   esac
 done
 
+# The preview timer fires this alongside dori-status, and both can be the first
+# to reach a cold adb. Same lock, same reason.
+dori_adb_ready
+
 # With the cable in and Wi-Fi on at the same time, adb sees two devices and
 # every bare adb call fails with "more than one device". Always name one, and
 # prefer the cable: it is the faster transport and the one just plugged in.
