@@ -1,8 +1,15 @@
-# Dori
+# Dori — use an Android phone as a webcam on Linux
+
+**Turn your Android phone into a webcam and a second screen on Linux.** The
+phone's camera appears as an ordinary `/dev/video*` device, so **Google Meet,
+Zoom, Microsoft Teams, Discord, Slack, Jitsi, Firefox, Chrome and OBS Studio**
+see it as any other USB webcam — no app to install on the phone, no account, no
+video going through anyone else's server.
 
 An Android phone is a good camera and a spare screen that you already own. Dori
 puts both on the Omarchy bar: one icon, one panel, everything over the USB cable
-you charge with.
+you charge with. It runs on Wayland and Hyprland, built on `adb`, `scrcpy` and
+`v4l2loopback`.
 
 ![The Dori panel: camera controls with viewfinder, rotation, resolution and frame rate, screen mirroring, and connection toggles](preview.png)
 
@@ -10,11 +17,13 @@ you charge with.
   refreshed about every two and a half seconds while the panel is open, and not
   at all when it is closed or when the full mirror is up.
 - **Camera** — the phone's back or front camera appears as an ordinary webcam at
-  `/dev/video10`, so Meet, Zoom, Discord, OBS and anything else that opens a
-  `/dev/video*` node can use it without knowing where the picture comes from.
-  Rotation, resolution and frame rate are on the panel, and a **viewfinder**
-  button opens the loopback node in a window so you can fix your framing
-  without joining a call to look at yourself.
+  `/dev/video10`, so Google Meet, Zoom, Microsoft Teams, Discord, Slack, Jitsi,
+  OBS Studio and anything else that opens a `/dev/video*` node can use it
+  without knowing where the picture comes from — and a modern phone's rear
+  sensor is a far better camera than the one in a laptop lid. Rotation,
+  resolution and frame rate are on the panel, and a **viewfinder** button opens
+  the loopback node in a window so you can fix your framing without joining a
+  call to look at yourself.
 - **Screen** — the phone's display mirrored in a window, with audio and
   keyboard, at a bitrate and codec you choose.
 - **Screenshot** — one click puts the phone's screen on your clipboard and in
@@ -103,6 +112,25 @@ and puts the phone's daemon back on USB, so it is not left listening.
 The icon stays on the bar, dimmed, when no phone is attached. Turn on **Hide the
 bar icon when no phone is attached** in the plugin's settings if you would rather
 it disappeared.
+
+### Picking the phone in a video call
+
+The phone shows up as **Phone Camera**, alongside any built-in webcam.
+
+| App | Where |
+|---|---|
+| Google Meet | Settings › Video › Camera |
+| Zoom | Settings › Video › Camera |
+| Microsoft Teams | Settings › Devices › Camera |
+| Discord | Settings › Voice & Video › Video Device |
+| Slack | Settings › Audio & Video › Camera |
+| Jitsi, or any site in Firefox or Chrome | the camera picker in the call, or the browser's site permissions |
+| OBS Studio | add a **Video Capture Device (V4L2)** source |
+
+Start the camera from the panel *before* opening the app — most of them scan
+for devices once, at startup, and a webcam that appears later will not be in
+the list until they are restarted. If the picture is upside down or sideways,
+set that camera's rotation in the panel rather than fighting it in the app.
 
 ## Settings
 
