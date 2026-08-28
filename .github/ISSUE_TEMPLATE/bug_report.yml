@@ -1,0 +1,54 @@
+name: Bug report
+description: Something in Dori does not work.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Dori talks to a real phone over adb, so the phone and the cable matter
+        as much as the code. `dori-status` prints everything I need to know.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of `bin/dori-status`
+      description: Run it with the phone attached, the way it was when the bug happened.
+      render: json
+    validations:
+      required: true
+  - type: input
+    id: phone
+    attributes:
+      label: Phone and Android version
+      placeholder: "Pixel 7, Android 14"
+    validations:
+      required: true
+  - type: dropdown
+    id: connection
+    attributes:
+      label: Connection
+      options:
+        - USB
+        - Wi-Fi
+        - Both, same result
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: scrcpy and android-tools versions
+      placeholder: "scrcpy 2.7, android-tools 35.0.2"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Anything the script printed, or `journalctl --user -u 'dori-*'`.
+      render: shell
