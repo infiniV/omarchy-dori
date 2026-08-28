@@ -45,8 +45,11 @@ if [[ $ACTION == "uninstall" ]]; then
   say "Removing Dori's host setup"
   sudo rm -f "$MODPROBE_CONF" "$MODULES_CONF"
   ok "removed $MODPROBE_CONF and $MODULES_CONF"
-  sudo modprobe -r v4l2loopback 2>/dev/null && ok "unloaded v4l2loopback" ||
+  if sudo modprobe -r v4l2loopback 2>/dev/null; then
+    ok "unloaded v4l2loopback"
+  else
     warn "v4l2loopback is in use; it will be gone after the next reboot"
+  fi
   echo
   echo "The packages are left installed. Remove them yourself if nothing else uses them:"
   echo "  sudo pacman -Rns v4l2loopback-dkms scrcpy android-tools"
@@ -85,8 +88,11 @@ else
     warn "modprobe failed; a reboot may be needed for the dkms module to build"
     exit 1
   }
-  [[ -c "/dev/video$VIDEO_NR" ]] && ok "/dev/video$VIDEO_NR created" ||
+  if [[ -c "/dev/video$VIDEO_NR" ]]; then
+    ok "/dev/video$VIDEO_NR created"
+  else
     warn "module loaded but /dev/video$VIDEO_NR is missing; check $MODPROBE_CONF"
+  fi
 fi
 
 # logind hands the active local session an ACL on /dev/video*, so the video

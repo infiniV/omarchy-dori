@@ -201,8 +201,8 @@ start_mirror() {
   # cable, so the only real failure is scrcpy exiting — a process still running
   # is a mirror still opening, and saying otherwise was a lie the panel showed
   # while the window was on its way.
-  local i
-  for i in {1..60}; do
+  local _
+  for _ in {1..60}; do
     hyprctl clients -j 2>/dev/null |
       jq -e --arg t "$TITLE" 'any(.[]; .title == $t)' >/dev/null 2>&1 && return 0
     mirror_running || {
