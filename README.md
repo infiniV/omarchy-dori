@@ -4,7 +4,7 @@ An Android phone is a good camera and a spare screen that you already own. Dori
 puts both on the Omarchy bar: one icon, one panel, everything over the USB cable
 you charge with.
 
-![Dori: the phone's screen mirrored on the desktop, next to the Dori panel](preview.png)
+![The Dori panel: camera controls with viewfinder, rotation, resolution and frame rate, screen mirroring, and connection toggles](preview.png)
 
 - **Live preview** — a still of the phone's screen beside the controls,
   refreshed about every two and a half seconds while the panel is open, and not
